@@ -1,0 +1,16 @@
+# credentials and local state: never commit
+.env
+.venv/
+*.iam.gserviceaccount.com.json
+gsheets-*.json
+*-credentials*.json
+reps.csv
+do_not_email.txt
+watcher_state.json
+sent_log.jsonl
+offers.json
+drafts/
+outbox/
+pages/
+__pycache__/
+*.pyc

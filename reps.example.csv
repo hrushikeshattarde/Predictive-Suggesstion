@@ -1,0 +1,6 @@
+name,email,title
+# Copy to reps.csv and fill in real values. Name as CargoTel shows it (LAST, FIRST) or First Last.
+# Title is optional (default "Sales Rep"); name, title and email form the signature. No phone numbers.
+CROMWELL, JUSTICE,justice.cromwell@example.com,Sales Rep
+MITCHELL, STUART,stuart.mitchell@example.com,Sales Manager
+HANEY, ANGELICA,angelica.haney@example.com
