@@ -127,6 +127,20 @@ Stage 1 shakes out cookie access, IAM, Bedrock access and SES configuration befo
 email leaves. Pausing at any stage: `.\deploy\deploy.ps1 -Paused`, or disable the schedule
 in EventBridge Scheduler.
 
+Dry-run passes still write to `state/sent_log.jsonl` and `state/offers.json` (the file
+transport counts as a send for the duplicate guards). When moving from stage 1 to a sending
+stage, delete those two objects first, or the 24 h carrier cooldown and the 72 h repeat
+guard will hold real emails because of outbox-only ones:
+
+```powershell
+aws s3 rm s3://circle-reload-suggestions/state/sent_log.jsonl --profile paybot-admin
+aws s3 rm s3://circle-reload-suggestions/state/offers.json --profile paybot-admin
+```
+
+Deployed 2026-10-13 in stage 1. The first pass on AWS took about three minutes for 9
+drafts; the watcher draft cap of 20 per pass and the 15-minute cadence clear a backlog of
+a day's dispatches within an hour.
+
 ## 6. Alarms and bounces
 
 Set up once, by hand or later in the script:
