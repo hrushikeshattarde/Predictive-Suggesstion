@@ -105,13 +105,24 @@ def _name_key(name: str) -> str:
     return " ".join(nice_name(name).lower().split())
 
 
-def load_rep_details(path: str) -> dict[str, dict[str, str]]:
-    """``reps.csv`` -> {name key: {"email", "title"}}.
+_PHONE_FIELD_RE = re.compile(r"[\d\s().+-]+(?:(?:x|ext\.?)\s*\d+)?", re.I)
 
-    Columns: ``name,email[,title]`` (header optional, ``#`` lines ignored). CargoTel names
-    carry a comma ("LINK, KYLE"); unquoted, that splits the name into two fields, so the
-    row is read around the email: the first field containing ``@`` is the email,
-    everything before it is the name, the field after it (if any) is the title.
+
+def _looks_like_phone(cell: str) -> bool:
+    """A reps.csv field that is a phone number: seven or more digits and nothing but
+    digits, punctuation, spaces and an extension marker ("260-208-4500 ext. 1212")."""
+
+    return sum(c.isdigit() for c in cell) >= 7 and _PHONE_FIELD_RE.fullmatch(cell.strip()) is not None
+
+
+def load_rep_details(path: str) -> dict[str, dict[str, str]]:
+    """``reps.csv`` -> {name key: {"email", "title", "phone"}}.
+
+    Columns: ``name,email[,title][,phone]`` (header optional, ``#`` lines ignored). CargoTel
+    names carry a comma ("LINK, KYLE"); unquoted, that splits the name into two fields, so
+    the row is read around the email: the first field containing ``@`` is the email and
+    everything before it is the name. Of the fields after it, one that looks like a phone
+    number is the phone and the first other non-empty one is the title, in either order.
     """
 
     reps: dict[str, dict[str, str]] = {}
@@ -127,10 +138,13 @@ def load_rep_details(path: str) -> dict[str, dict[str, str]]:
             name = ",".join(row[:at]).strip()
             if not name or name.lower() == "name":
                 continue
-            rest = [c.strip() for c in row[at + 1:]]
+            rest = [c.strip() for c in row[at + 1:] if c.strip()]
+            phone = next((c for c in rest if _looks_like_phone(c)), "")
+            others = [c for c in rest if c != phone]
             reps[_name_key(name)] = {
                 "email": row[at].strip(),
-                "title": rest[0] if rest and rest[0] else "",
+                "title": others[0] if others else "",
+                "phone": phone,
             }
     return reps
 
@@ -148,7 +162,7 @@ def rep_email_for(name: str | None, reps: dict[str, str]) -> str | None:
 
 
 def rep_signature_for(name: str | None, details: dict[str, dict[str, str]]) -> dict[str, str]:
-    """Signature extras for the sales rep: ``{"title", "email"}`` where known."""
+    """Signature extras for the sales rep: ``{"title", "email", "phone"}`` where known."""
 
     if not name:
         return {}

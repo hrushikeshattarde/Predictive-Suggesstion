@@ -227,8 +227,16 @@ class SendAllTests(unittest.TestCase):
         self.run_send(transport, mode="auto", rep_details=details)
         _, message = transport.sent[0]
         self.assertTrue(message.body.rstrip().endswith("Stuart Mitchell\nSales Manager, Circle Logistics\nstuart@example.com"))
-        self.assertIn("call Stuart Mitchell", message.body)
+        self.assertIn("call Stuart Mitchell to book", message.body)
         self.assertNotIn("Amossi Bujaga", message.body)
+
+    def test_signature_and_closing_carry_the_rep_phone_when_known(self):
+        details = {"stuart mitchell": {"email": "stuart@example.com", "title": "Sales Manager", "phone": "260-208-4500 ext. 1101"}}
+        transport = FakeTransport()
+        self.run_send(transport, mode="auto", rep_details=details)
+        _, message = transport.sent[0]
+        self.assertIn("call Stuart Mitchell at 260-208-4500 ext. 1101 to book", message.body)
+        self.assertTrue(message.body.rstrip().endswith("Stuart Mitchell\nSales Manager, Circle Logistics\nstuart@example.com\n260-208-4500 ext. 1101"))
 
     def test_one_email_per_carrier_per_cooldown(self):
         # A second truck of the same carrier (same email, different name spelling) the same day is held.
@@ -338,11 +346,16 @@ class SendAllTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "reps.csv")
             with open(path, "w", encoding="utf-8") as handle:
-                handle.write("name,email,title\n# comment, with, commas\nMITCHELL, STUART,stuart@example.com,Sales Manager\nHANEY, ANGELICA,angelica@example.com\nLINK, KYLE,kyle@example.com,\n")
+                handle.write("name,email,title,phone\n# comment, with, commas\nMITCHELL, STUART,stuart@example.com,Sales Manager\nHANEY, ANGELICA,angelica@example.com\nLINK, KYLE,kyle@example.com,\n"
+                             "STORM, VICTORIA,victoria@example.com,Senior Account Manager,260-208-4500 ext. 1212\n"
+                             "CROMWELL, JUSTICE,justice@example.com,(260) 204-3067,Sales Rep\n")
             details = load_rep_details(path)
-        self.assertEqual(details["stuart mitchell"], {"email": "stuart@example.com", "title": "Sales Manager"})
-        self.assertEqual(details["angelica haney"], {"email": "angelica@example.com", "title": ""})
-        self.assertEqual(details["kyle link"], {"email": "kyle@example.com", "title": ""})
+        self.assertEqual(details["stuart mitchell"], {"email": "stuart@example.com", "title": "Sales Manager", "phone": ""})
+        self.assertEqual(details["angelica haney"], {"email": "angelica@example.com", "title": "", "phone": ""})
+        self.assertEqual(details["kyle link"], {"email": "kyle@example.com", "title": "", "phone": ""})
+        self.assertEqual(details["victoria storm"], {"email": "victoria@example.com", "title": "Senior Account Manager", "phone": "260-208-4500 ext. 1212"})
+        self.assertEqual(details["justice cromwell"], {"email": "justice@example.com", "title": "Sales Rep", "phone": "(260) 204-3067"})  # phone and title in either order
+        self.assertEqual(rep_signature_for("Victoria Storm", details), {"email": "victoria@example.com", "title": "Senior Account Manager", "phone": "260-208-4500 ext. 1212"})
         self.assertEqual(rep_signature_for("Stuart Mitchell", details), {"email": "stuart@example.com", "title": "Sales Manager"})
         self.assertEqual(rep_signature_for("ANGELICA HANEY", details), {"email": "angelica@example.com"})
         self.assertEqual(rep_signature_for(None, details), {})

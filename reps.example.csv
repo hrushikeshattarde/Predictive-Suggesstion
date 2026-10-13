@@ -1,6 +1,7 @@
-name,email,title
+name,email,title,phone
 # Copy to reps.csv and fill in real values. Name as CargoTel shows it (LAST, FIRST) or First Last.
-# Title is optional (default "Sales Rep"); name, title and email form the signature. No phone numbers.
-CROMWELL, JUSTICE,justice.cromwell@example.com,Sales Rep
-MITCHELL, STUART,stuart.mitchell@example.com,Sales Manager
+# Title (default "Sales Rep") and phone are optional. Name, title, email and phone form the
+# signature, and the closing line says "call <rep> at <phone>" when the phone is given.
+CROMWELL, JUSTICE,justice.cromwell@example.com,Sales Rep,260-555-0116
+MITCHELL, STUART,stuart.mitchell@example.com,Sales Manager,260-555-0101 ext. 1101
 HANEY, ANGELICA,angelica.haney@example.com

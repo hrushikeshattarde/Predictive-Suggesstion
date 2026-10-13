@@ -43,6 +43,14 @@ class CheckTests(unittest.TestCase):
         self.assertIn("the signature is missing (the email may be cut off)", check(GOOD.replace("Sales Rep, Circle Logistics", ""), FACTS))
         self.assertIn("the sales rep Justice Cromwell is not named in the email", check(GOOD.replace("Justice Cromwell", "someone"), FACTS))
 
+    def test_only_the_sales_rep_phone_is_allowed(self):
+        facts = dict(FACTS, circle_rep=dict(FACTS["circle_rep"], phone="260-208-4500 ext. 1616"))
+        body = GOOD.replace("Reply or call Justice Cromwell.", "Reply or call Justice Cromwell at 260-208-4500 ext. 1616.") + "\njustice@example.com\n260-208-4500 ext. 1616"
+        self.assertEqual(check(body, facts), [])
+        self.assertEqual(check(GOOD + "\n(260) 208-4500", facts), [])  # same number, other punctuation
+        problems = check(body + "\nOr try (555) 010-0001.", facts)
+        self.assertTrue(any(p.startswith("a phone number other than the sales rep's appears") for p in problems), problems)
+
 
 class CachingShapeTests(unittest.TestCase):
     def test_system_blocks_end_with_a_cache_point(self):

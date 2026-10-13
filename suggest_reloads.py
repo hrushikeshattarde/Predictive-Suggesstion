@@ -497,7 +497,9 @@ def render_email(
     """The draft. With ``delivered_at`` the truck has already dropped the load (the
     watcher's trigger) and the intro says so; without it the load is merely dispatched.
     The contact and the signature are the load's sales rep; ``rep_signature`` may add
-    ``title`` and ``email`` for that rep (from reps.csv). No phone numbers. A load with no
+    ``title``, ``email`` and ``phone`` for that rep (from reps.csv); the rep's phone is the
+    only phone number in the email, after the name in the closing line and as the last
+    signature line. A load with no
     sales rep renders with a visible placeholder and ``needs_sales_rep`` set, and must not
     be sent."""
 
@@ -541,15 +543,19 @@ def render_email(
     rep = load.contact_rep_display or "[SALES REP NOT ASSIGNED]"
     sig = rep_signature or {}
     title = sig.get("title") or "Sales Rep"
+    phone = (sig.get("phone") or "").strip()
+    call = f"call {rep} at {phone}" if phone else f"call {rep}"
     lines += [
         "",
-        f"Reply to this email or call {rep} to book any of them.",
+        f"Reply to this email or {call} to book any of them.",
         "",
         rep,
         f"{title}, Circle Logistics",
     ]
     if sig.get("email"):
         lines.append(sig["email"])
+    if phone:
+        lines.append(phone)
     cc_names = ", ".join(nice_name(n) for n in load.cc_reps) or "no sales rep on the load"
     return {
         "to": load.carrier.email or "<carrier dispatcher email: not on the load page>",

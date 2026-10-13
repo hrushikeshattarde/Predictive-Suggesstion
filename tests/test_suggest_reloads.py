@@ -304,6 +304,9 @@ class EmailTests(unittest.TestCase):
         signed = render_email(load, picks, rep_signature={"title": "Sales Manager", "email": "stuart@example.com"})
         self.assertTrue(signed["body"].rstrip().endswith("Stuart Mitchell\nSales Manager, Circle Logistics\nstuart@example.com"))
         self.assertNotRegex(signed["body"], r"\(\d{3}\) \d{3}-\d{4}")
+        with_phone = render_email(load, picks, rep_signature={"title": "Sales Manager", "email": "stuart@example.com", "phone": "260-208-4500 ext. 1101"})
+        self.assertIn("call Stuart Mitchell at 260-208-4500 ext. 1101 to book", with_phone["body"])
+        self.assertTrue(with_phone["body"].rstrip().endswith("stuart@example.com\n260-208-4500 ext. 1101"))
         self.assertIn("Hi Eugen Padureanu,", email["body"])
         self.assertIn("delivers 2 units to Orland Hills, IL 60477 on 12-Oct-2026 Mon 11 AM EST", email["body"])
         # The carrier on this page is based in IL, so neither built load heads "home" and

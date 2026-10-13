@@ -62,7 +62,7 @@ Hard rules
 - Use only the facts given. Never invent a load, a place, a date, a count, a distance or a rate. If a fact is missing, leave it out; do not guess.
 - Include every suggested load number exactly as given, each on its own numbered line, in the order given. Never add, drop or renumber a load.
 - Do not mention prices or rates anywhere. One sentence near the end says rates are available on request.
-- Never include a phone number. The only Circle person named anywhere is the sales rep given in circle_rep.
+- The only Circle person named anywhere is the sales rep given in circle_rep. The only phone number allowed is that rep's phone from circle_rep.phone, written exactly as given; when it is missing, the email has no phone number at all. Never include any other phone number.
 - No marketing tone, no emojis, no exclamation marks, no bullet symbols other than the numbered list.
 
 Shape of the email
@@ -71,11 +71,11 @@ Shape of the email
 - One sentence that introduces the list: how many loads, where they pick up, and how far that yard is from the delivery point. When the loads pick up at more than one yard, group the lines by yard and give each yard's distance once.
 - Built loads (several vehicles already grouped into one truckload) come before single orders.
 - Each load line: the load number, then the vehicle count and models, then the destination as city and state only (no zip codes), then the road miles. Keep each line under 110 characters. Example: "1. Load 344231: 5 vehicles (3 x 1500, 3500, 5500) to Milwaukee, Monroe and Madison, WI, 150 road miles."
-- Closing: one sentence asking them to reply to this email or call the sales rep, with "Rates are available on request." Then the signature: the sales rep's name on one line, their title and "Circle Logistics" on the next, their email on a third line when given.
+- Closing: one sentence asking them to reply to this email or call the sales rep, with the phone right after the name when given ("call Kyle Link at 260-555-0104"), plus "Rates are available on request." Then the signature: the sales rep's name on one line, their title and "Circle Logistics" on the next, their email on a third line when given, their phone on a fourth line when given.
 - About 10 to 16 lines in total. Short sentences, plain words.
 
 Worked example
-Facts: load 343514, 3 x 2026 Mercedes G-Class, delivers to Grapevine, TX on Wed 7 PM; contact Eugen Padureanu; sales rep Kyle Link, Sales Rep, kyle.link@example.com; suggested: order 331794 (1 vehicle, Topolino) from Dallas, TX 17 miles away to Florence, KY, 910 road miles; order 331796 (same).
+Facts: load 343514, 3 x 2026 Mercedes G-Class, delivers to Grapevine, TX on Wed 7 PM; contact Eugen Padureanu; sales rep Kyle Link, Sales Rep, kyle.link@example.com, phone 260-555-0104; suggested: order 331794 (1 vehicle, Topolino) from Dallas, TX 17 miles away to Florence, KY, 910 road miles; order 331796 (same).
 Email:
 Subject: Next loads near Grapevine, TX after load 343514
 
@@ -86,11 +86,12 @@ Your truck delivers load 343514 (3 x 2026 Mercedes G-Class) to Grapevine, TX on 
 1. Order 331794: 1 vehicle (Topolino) to Florence, KY, 910 road miles.
 2. Order 331796: 1 vehicle (Topolino) to Florence, KY, 910 road miles.
 
-Rates are available on request. Reply to this email or call Kyle Link if either fits your truck.
+Rates are available on request. Reply to this email or call Kyle Link at 260-555-0104 if either fits your truck.
 
 Kyle Link
 Sales Rep, Circle Logistics
 kyle.link@example.com
+260-555-0104
 
 Output format: the first line is "Subject: <subject>", then a blank line, then the email body. Nothing else, no commentary."""
 
@@ -108,7 +109,7 @@ def facts_for(result: dict[str, Any], delivered_at: str | None, rep_signature: d
                      "scheduled": load.destination.when, "delivered_at": delivered_at},
         "pickup_of_this_load": {"city_state": load.origin.city_state, "when": load.origin.when},
         "circle_rep": {"name": load.contact_rep_display, "role": "sales rep", "title": sig.get("title") or "Sales Rep",
-                       "email": sig.get("email")},
+                       "email": sig.get("email"), "phone": sig.get("phone")},
         "carrier": {"name": load.carrier.name, "contact_name": load.carrier.contact_name, "base": ", ".join(p for p in (load.carrier.city, load.carrier.state) if p) or None},
         "search_radius_miles": (result.get("search") or {}).get("params", {}).get("Menu__radius__1__oradius", DEFAULT_MILES),
         "suggested_loads": [
@@ -202,6 +203,16 @@ def write_email(load, picks, *, signature: dict[str, str] | None, delivered_at: 
     return subject, body, usage
 
 
+def _phone_key(text: Any) -> str:
+    """The ten-digit core of a phone number: non-digits dropped, a leading country code 1
+    and any extension ignored, so 260-208-4500 ext. 1212 and (260) 208-4500 compare equal."""
+
+    digits = re.sub(r"\D", "", str(text or ""))
+    if len(digits) > 10 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits[:10]
+
+
 def check(body: str, facts: dict[str, Any]) -> list[str]:
     """Deterministic gate: every suggested load present, no unknown six-digit numbers, no rates."""
 
@@ -217,8 +228,13 @@ def check(body: str, facts: dict[str, Any]) -> list[str]:
         problems.append("a dollar amount appears in the email")
     if "circle logistics" not in body.lower():
         problems.append("the signature is missing (the email may be cut off)")
-    if re.search(r"\(\d{3}\)\s?\d{3}-\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b", body):
-        problems.append("a phone number appears in the email")
+    allowed_phone = _phone_key((facts.get("circle_rep") or {}).get("phone"))
+    for found in re.findall(r"\(?\b\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b", body):
+        if allowed_phone and _phone_key(found) == allowed_phone:
+            continue
+        problems.append("a phone number appears in the email" if not allowed_phone
+                        else f"a phone number other than the sales rep's appears in the email ({found.strip()})")
+        break
     rep = (facts.get("circle_rep") or {}).get("name")
     if rep and rep not in body:
         problems.append(f"the sales rep {rep} is not named in the email")
