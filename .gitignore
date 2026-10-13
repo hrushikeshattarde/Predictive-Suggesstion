@@ -19,3 +19,22 @@ __pycache__/
 build/
 dist/
 *.zip
+
+# due_date_alerts: local state and dry-run output
+due_date_alerts/alert_state.json
+due_date_alerts/rep_cache.json
+due_date_alerts/sent_log.jsonl
+due_date_alerts/outbox/
+due_date_alerts/pages/
+due_date_alerts/build/
+due_date_alerts/dist/
+
+# pickup_eta_alerts: local state and dry-run output
+pickup_eta_alerts/alert_state.json
+pickup_eta_alerts/rep_cache.json
+pickup_eta_alerts/customer_reps.json
+pickup_eta_alerts/sent_log.jsonl
+pickup_eta_alerts/outbox/
+pickup_eta_alerts/pages/
+pickup_eta_alerts/build/
+pickup_eta_alerts/dist/

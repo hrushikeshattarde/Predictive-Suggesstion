@@ -18,6 +18,8 @@ https://claude.ai/code/artifact/2d853d83-e36c-48fc-8f35-3cc9336a0f89).
 | `docs/AWS_DEPLOYMENT.md` | How it runs on AWS, the environment variables, the rollout stages, alarms, and what to check before going live. |
 | `requirements.txt` | Pinned runtime dependencies, bundled into the Lambda zip. |
 | `tests/` | Unit tests on synthetic pages that mirror the live markup. `python -m unittest`. |
+| `due_date_alerts/` | Separate job: emails each sales rep the Spot Load Map loads due within 48 hours (Cc Justice Cromwell and Stuart Mitchell). Own README, tests, Lambda and deploy script; reuses the modules above. |
+| `pickup_eta_alerts/` | Separate job: emails the dispatch rep and the sales rep the Spot Loads - Tracking loads that need a pickup update: no pickup ETA, a pickup ETA that passed while still Dispatched, or no scheduled pickup date (Cc Justice Cromwell and Stuart Mitchell). Same-day loads are skipped and a missing sales rep is taken from the customer's other loads. Own README, tests, Lambda and deploy script; reuses the modules above and the email plumbing of `due_date_alerts/`. |
 
 Both scripts read the `cgt-browser-session` cookie from
 `s3://circle-bot-cookies/rubicon/cargotel.json` through the default boto3 credential chain
