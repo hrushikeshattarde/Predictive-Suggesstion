@@ -128,18 +128,27 @@ email leaves. Pausing at any stage: `.\deploy\deploy.ps1 -Paused`, or disable th
 in EventBridge Scheduler.
 
 Dry-run passes still write to `state/sent_log.jsonl` and `state/offers.json` (the file
-transport counts as a send for the duplicate guards). When moving from stage 1 to a sending
-stage, delete those two objects first, or the 24 h carrier cooldown and the 72 h repeat
-guard will hold real emails because of outbox-only ones:
+transport counts as a send for the duplicate guards). The effect after flipping to a
+sending stage is small: a carrier that got an outbox-only email is held for 24 hours, and
+the loads in it are not re-offered to that carrier for 72 hours. Leave both files alone if
+a real send is already recorded in them (an entry whose `message_id` is an SES id rather
+than `file:...`). Only if every entry is a dry run can they be deleted before the flip to
+start clean:
 
 ```powershell
 aws s3 rm s3://circle-reload-suggestions/state/sent_log.jsonl --profile paybot-admin
 aws s3 rm s3://circle-reload-suggestions/state/offers.json --profile paybot-admin
 ```
 
+To send a single draft by hand (as was done for the first real email), copy `state/` and
+`config/` from the bucket and that one draft into a scratch folder, run `send_drafts.py`
+on it with `--send --llm --recheck --max-sends 1`, then copy `sent_log.jsonl` and
+`offers.json` back to `state/` so the scheduled passes know about it.
+
 Deployed 2026-10-13 in stage 1. The first pass on AWS took about three minutes for 9
 drafts; the watcher draft cap of 20 per pass and the 15-minute cadence clear a backlog of
-a day's dispatches within an hour.
+a day's dispatches within an hour. The first real email went out the same morning for
+load 344323 by the manual procedure above.
 
 ## 6. Alarms and bounces
 
