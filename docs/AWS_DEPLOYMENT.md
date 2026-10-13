@@ -128,12 +128,14 @@ email leaves. Pausing at any stage: `.\deploy\deploy.ps1 -Paused`, or disable th
 in EventBridge Scheduler.
 
 Dry-run passes still write to `state/sent_log.jsonl` and `state/offers.json` (the file
-transport counts as a send for the duplicate guards). The effect after flipping to a
-sending stage is small: a carrier that got an outbox-only email is held for 24 hours, and
-the loads in it are not re-offered to that carrier for 72 hours. Leave both files alone if
-a real send is already recorded in them (an entry whose `message_id` is an SES id rather
-than `file:...`). Only if every entry is a dry run can they be deleted before the flip to
-start clean:
+transport counts as a send for the duplicate guards). After flipping to a sending stage,
+every draft that went to the outbox is therefore "already sent" and never emailed, and its
+carrier is on the 24-hour cooldown. To let the live passes send those drafts, strip the
+dry-run records right after the flip, between two scheduled passes: drop every sent-log
+line whose `message_id` starts with `file:`, and drop the offer records for the carriers
+in those lines (keep lines with an SES message id and their offers). Copy both files down,
+edit, copy back; the next pass picks them up. If every entry is a dry run, deleting the two
+objects does the same thing:
 
 ```powershell
 aws s3 rm s3://circle-reload-suggestions/state/sent_log.jsonl --profile paybot-admin
