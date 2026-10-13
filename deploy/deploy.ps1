@@ -62,7 +62,7 @@ $Aws = @("--profile", $AwsProfile, "--region", $Region)
 $RoleName = "$FunctionName-role"
 $SchedulerRoleName = "$FunctionName-scheduler-role"
 $Modules = @("lambda_handler.py", "dispatch_watcher.py", "send_drafts.py", "suggest_reloads.py",
-             "cargotel_search.py", "bedrock_email.py", "gmail_send.py")
+             "cargotel_search.py", "bedrock_email.py", "gmail_send.py", "pull_load_detail.py")
 
 function Invoke-Aws {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$CliArgs)
