@@ -1,0 +1,7 @@
+# Runtime dependencies, pinned to the versions the local .venv was built with.
+# boto3 is bundled into the Lambda zip rather than taken from the runtime, because the
+# Bedrock prompt-cache TTL option needs a recent botocore.
+boto3==1.43.112
+botocore==1.43.112
+requests==2.34.2
+python-dotenv==1.2.4

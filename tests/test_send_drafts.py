@@ -274,7 +274,8 @@ class SendAllTests(unittest.TestCase):
 
     def test_stale_draft_is_not_sent(self):
         path = os.path.join(self.drafts_dir, "343514_x.json")
-        old = (datetime.now() - timedelta(hours=20)).timestamp()
+        # Relative to the fixed clock run_send uses, not the wall clock (the files are written today).
+        old = (datetime(2026, 10, 12, 12, 0) - timedelta(hours=20)).timestamp()
         os.utime(path, (old, old))
         transport = FakeTransport()
         counts = self.run_send(transport)
@@ -308,6 +309,7 @@ class SendAllTests(unittest.TestCase):
             raise RuntimeError("bedrock down")
 
         os.remove(os.path.join(self.tmp.name, "sent.jsonl"))
+        os.remove(os.path.join(self.tmp.name, "offers.json"))  # else the 72 h repeat guard blocks the resend
         transport = FakeTransport()
         counts = self.run_send(transport, writer=failing_writer)
         self.assertEqual(counts["sent"], 1)
@@ -319,6 +321,7 @@ class SendAllTests(unittest.TestCase):
             return None  # failed the fact check
 
         os.remove(os.path.join(self.tmp.name, "sent.jsonl"))
+        os.remove(os.path.join(self.tmp.name, "offers.json"))  # else the 72 h repeat guard blocks the resend
         transport = FakeTransport()
         self.run_send(transport, writer=rejecting_writer)
         _, message = transport.sent[0]

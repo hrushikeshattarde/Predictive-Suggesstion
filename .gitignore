@@ -14,3 +14,8 @@ outbox/
 pages/
 __pycache__/
 *.pyc
+
+# deploy artefacts
+build/
+dist/
+*.zip

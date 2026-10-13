@@ -13,6 +13,10 @@ https://claude.ai/code/artifact/2d853d83-e36c-48fc-8f35-3cc9336a0f89).
 | `bedrock_email.py` | One load end to end with Claude Sonnet 5.5 on Bedrock writing the email from the facts, a deterministic fact check, and SES sending. Test addressing (TEST_TO / TEST_CC, "[TEST]" prefix) unless `--production`, which addresses the carrier and Cc's the sales rep(s). |
 | `gmail_send.py` | Gmail API sender via the service account (impersonates a mailbox); kept for reading replies later. |
 | `reps.example.csv` | Template for `reps.csv`: rep name as CargoTel shows it, email, optional title. The email is signed by the load's sales rep (name, title, email; no phone numbers); a load with no sales rep assigned is held, never sent. |
+| `lambda_handler.py` | AWS Lambda entry point: one watcher pass then one sender pass per invocation, with `config/`, `state/`, `drafts/`, `outbox/` and `pages/` mirrored to an S3 bucket. Switches are environment variables (`RELOAD_SEND`, `RELOAD_LLM`, `RELOAD_PAUSED`, ...). |
+| `deploy/` | `deploy.ps1` builds the zip and creates or updates the bucket, IAM roles, Lambda function and EventBridge schedule; the JSON files are the policy templates it fills in. |
+| `docs/AWS_DEPLOYMENT.md` | How it runs on AWS, the environment variables, the rollout stages, alarms, and what to check before going live. |
+| `requirements.txt` | Pinned runtime dependencies, bundled into the Lambda zip. |
 | `tests/` | Unit tests on synthetic pages that mirror the live markup. `python -m unittest`. |
 
 Both scripts read the `cgt-browser-session` cookie from
@@ -110,3 +114,16 @@ Three CargoTel quirks the parser handles, so callers do not have to:
   `signin_page` instead of returning an empty grid.
 - The radius fields sent as row 2 (`Menu__radius__2__*`) are echoed back but ignored; the
   module always sends row 1.
+
+## Running on AWS
+
+`lambda_handler.py` runs one watcher pass and one sender pass per invocation, with the
+working files in S3; `deploy/deploy.ps1` builds and deploys it, and
+[docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md) has the picture, the rollout stages
+(dry run to `outbox/`, optional pilot, live) and the pre-flight checks.
+
+```powershell
+.\deploy\deploy.ps1 -UploadConfig        # stage 1: on AWS, nothing sent
+.\deploy\deploy.ps1 -Send -Llm           # stage 3: live
+.\deploy\deploy.ps1 -CodeOnly            # code change only
+```
