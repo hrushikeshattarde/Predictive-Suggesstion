@@ -38,3 +38,11 @@ pickup_eta_alerts/outbox/
 pickup_eta_alerts/pages/
 pickup_eta_alerts/build/
 pickup_eta_alerts/dist/
+
+# duplicate_check: local run output (the CSVs hold customer VINs and order numbers)
+duplicate_check/duplicate_orders_*.csv
+duplicate_check/sent_log.jsonl
+duplicate_check/outbox/
+duplicate_check/pages/
+duplicate_check/build/
+duplicate_check/dist/

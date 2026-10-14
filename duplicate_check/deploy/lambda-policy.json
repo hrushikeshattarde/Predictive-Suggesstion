@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadCargoTelCookie",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::{{COOKIE_BUCKET}}/{{COOKIE_KEY}}"
+    },
+    {
+      "Sid": "ListWorkBucket",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::{{BUCKET}}"
+    },
+    {
+      "Sid": "ReadWriteOwnPrefix",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::{{BUCKET}}/{{PREFIX}}*"
+    },
+    {
+      "Sid": "SendAsVehicles",
+      "Effect": "Allow",
+      "Action": ["ses:SendEmail", "ses:SendRawEmail"],
+      "Resource": [
+        "arn:aws:ses:{{REGION}}:{{ACCOUNT}}:identity/{{SES_IDENTITY}}",
+        "arn:aws:ses:{{REGION}}:{{ACCOUNT}}:identity/{{SES_DOMAIN}}",
+        "arn:aws:ses:{{REGION}}:{{ACCOUNT}}:configuration-set/*"
+      ]
+    }
+  ]
+}
