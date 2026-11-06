@@ -19,7 +19,9 @@ Environment variables::
     ALERT_SEND             "1" sends through SES; otherwise emails go to outbox/
     ALERT_HOURS            alert window (default 48)
     ALERT_REPEAT_HOURS     alert the same load again after this long (default 24)
-    ALERT_CC               comma-separated Cc list (default: Justice Cromwell, Stuart Mitchell)
+    ALERT_CC               comma-separated Cc on every email to a sales rep (default: Brett Booth)
+    ALERT_ESCALATE_TO      comma-separated To for loads with no sales rep or a rep missing from
+                           reps.csv (default: Justice Cromwell, Stuart Mitchell, Brett Booth)
     ALERT_NO_OVERDUE       "1" leaves out loads already past due
     ALERT_SAVE_PAGES       "1" archives the fetched page
     ALERT_WORKDIR          scratch folder (default /tmp/due-alerts)
@@ -65,6 +67,8 @@ def alert_args(work: str, env: Mapping[str, str]) -> list[str]:
     ]
     if env.get("ALERT_CC"):
         args += ["--cc", env["ALERT_CC"]]
+    if env.get("ALERT_ESCALATE_TO"):
+        args += ["--escalate-to", env["ALERT_ESCALATE_TO"]]
     if flag(env, "ALERT_SEND"):
         args.append("--send")
     if flag(env, "ALERT_NO_OVERDUE"):

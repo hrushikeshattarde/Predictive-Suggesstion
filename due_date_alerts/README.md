@@ -1,8 +1,9 @@
 # Due-date alerts
 
 Emails each sales rep the loads on the Spot Load Map that are due within 48 hours, from
-`vehicles@circledelivers.com`, Cc Justice Cromwell and Stuart Mitchell. Built on the
-CargoTel scraping and the rep list of the reload suggester one folder up.
+`vehicles@circledelivers.com`, Cc Brett Booth. Loads with no sales rep go to Justice
+Cromwell, Stuart Mitchell and Brett Booth instead. Built on the CargoTel scraping and the
+rep list of the reload suggester one folder up.
 
 | File | What it does |
 | --- | --- |
@@ -23,8 +24,8 @@ loads with due date <= now + 48 h          (past-due loads included; --no-overdu
 sales rep per load                         loadmaint.mcgi -> sales_rep / sales_rep2 / ass_user
    │                                       cached 12 h in rep_cache.json (a page takes 3-4 s)
    ▼
-one email per primary sales rep            To the rep (reps.csv), Cc Justice + Stuart (+ secondary rep)
-   │                                       no rep on the load, or rep not in reps.csv -> To Justice + Stuart
+one email per primary sales rep            To the rep (reps.csv), Cc Brett (+ secondary rep)
+   │                                       no rep on the load, or rep not in reps.csv -> To Justice + Stuart + Brett
    ▼
 alert_state.json                           a load repeats after 24 h, or at once if its due date or rep changed
 ```
@@ -57,7 +58,8 @@ Needs the AWS SSO session (`aws sso login`) for the CargoTel cookie in S3 and, w
 `--send`, SES rights on the vehicles@ identity. `--reps` defaults to `../reps.csv`.
 
 Switches worth knowing: `--hours` (48), `--repeat-hours` (24; `0` = every run),
-`--no-overdue`, `--cc` (comma-separated; default Justice and Stuart), `--rep-cache-hours`
+`--no-overdue`, `--cc` (comma-separated; default Brett), `--escalate-to` (comma-separated;
+default Justice, Stuart and Brett), `--rep-cache-hours`
 (12), `--max-lookups` (150 load pages per run), `--save-html DIR`, `--now ISO` (pretend
 it is another time), `--json FILE` (run summary, or the due loads with `--list`).
 
@@ -69,15 +71,19 @@ it is another time), `--json FILE` (run summary, or the due loads with `--list`)
 - **One email per rep per run**, never one per load. The same load is repeated to the same
   rep only after the repeat window (24 h locally, 20 h on AWS where the run is daily at
   8:00), but immediately if its due date moved or its sales rep changed.
-- **Nothing is dropped silently.** A load with no sales rep, or whose rep has no email in
-  `reps.csv`, goes to the Cc list (Justice + Stuart) as To, with the sales and dispatch
-  rep named per load. A load whose page could not be read is treated the same way.
+- **Who gets what** (changed 2026-11-02; until then Justice and Stuart were the Cc). An
+  email to a sales rep is Cc'd to Brett Booth only. A load with no sales rep, or whose rep
+  has no email in `reps.csv`, goes To Justice, Stuart and Brett, greeted by name, with the
+  sales and dispatch rep named per load. A load whose page could not be read is treated
+  the same way, so nothing is dropped silently.
 - **The secondary sales rep is Cc'd** when the load has one and `reps.csv` knows the address.
 - **Dry runs leave the state alone**, so flipping to `--send` later needs no cleanup
   (unlike the reload suggester's first day).
-- **Stuart Mitchell's address** is `smitchell@circledelivers.com`, the MAIN email on his
-  TransportPro user record (user 1349). Justice Cromwell's is the one in `reps.csv`.
-  Override both with `--cc` (or `ALERT_CC` on Lambda).
+- **Addresses.** Stuart Mitchell's is `smitchell@circledelivers.com`, the MAIN email on
+  his TransportPro user record (user 1349). Justice Cromwell's is the one in `reps.csv`.
+  Brett Booth's, `brett.booth@circledelivers.com`, was given by the user. Override with
+  `--cc` / `--escalate-to` (or `ALERT_CC` / `ALERT_ESCALATE_TO` on Lambda). The greeting
+  on the escalated email names everyone in the list it knows, else says "Hi team,".
 
 ## Open questions (seen on 2026-10-13)
 
@@ -88,8 +94,8 @@ it is another time), `--json FILE` (run summary, or the due loads with `--list`)
   the right thing if the move is real; if these values flap, raise `--repeat-hours` or
   ask the CargoTel admin how the calculation works.
 - **Most Spot Load Map loads have no sales rep.** On the first run 3 of the 10 due loads
-  had no `sales_rep` on the load page (only a dispatch rep), so they went to Justice and
-  Stuart. If the team would rather have the dispatch rep alerted in that case, that is a
+  had no `sales_rep` on the load page (only a dispatch rep), so they went to the
+  escalation list. If the team would rather have the dispatch rep alerted in that case, that is a
   small change in `address()`.
 - **Stale loads repeat every day** (one load was 13 days past due). That is by design,
   but `--no-overdue` or a cap on how many days past due to include are both easy to add.
@@ -117,7 +123,7 @@ load alerted later in the day still shows up next morning), bucket `circle-reloa
 | `due-alerts/pages/` | archived pages with `ALERT_SAVE_PAGES=1` |
 
 Environment variables: `ALERT_BUCKET`, `ALERT_PREFIX`, `ALERT_PAUSED`, `ALERT_SEND`,
-`ALERT_HOURS`, `ALERT_REPEAT_HOURS`, `ALERT_CC`, `ALERT_NO_OVERDUE`, `ALERT_SAVE_PAGES`,
+`ALERT_HOURS`, `ALERT_REPEAT_HOURS`, `ALERT_CC`, `ALERT_ESCALATE_TO`, `ALERT_NO_OVERDUE`, `ALERT_SAVE_PAGES`,
 `MAIL_FROM`, `SES_CONFIGURATION_SET`, `TZ`. The role may read the cookie object and
 `config/`, read and write `due-alerts/`, and send as vehicles@. No Bedrock.
 

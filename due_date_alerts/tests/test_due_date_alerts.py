@@ -19,6 +19,7 @@ for path in (os.path.dirname(FOLDER), FOLDER):
 from cargotel_search import parse_grid  # noqa: E402
 from due_date_alerts import (  # noqa: E402
     DEFAULT_CC,
+    DEFAULT_ESCALATE,
     UNASSIGNED,
     AlertState,
     RepCache,
@@ -33,6 +34,7 @@ from due_date_alerts import (  # noqa: E402
     parse_due,
     redirect,
     run_once,
+    team_greeting,
 )
 from suggest_reloads import DispatchedLoad  # noqa: E402
 
@@ -100,6 +102,8 @@ REPS = {
     "justice cromwell": {"email": "justice.cromwell@circledelivers.com", "title": "", "phone": ""},
 }
 CC = list(DEFAULT_CC)
+ESC = list(DEFAULT_ESCALATE)
+BRETT = "brett.booth@circledelivers.com"
 
 
 def lookup(load_id):
@@ -218,13 +222,18 @@ class ComposeTests(unittest.TestCase):
         attach_reps(due, lookup, RepCache(None), NOW)
         return {g.name: g for g in group_by_rep(due)}
 
-    def test_rep_with_email_gets_to_and_managers_cc_plus_secondary_rep(self):
+    def test_defaults_are_brett_on_cc_and_all_three_for_escalation(self):
+        self.assertEqual(CC, [BRETT])
+        self.assertEqual(ESC, ["justice.cromwell@circledelivers.com", "smitchell@circledelivers.com", BRETT])
+
+    def test_rep_with_email_gets_to_and_brett_cc_plus_secondary_rep(self):
         kyle = self.groups()["Kyle Link"]
-        to, cc, routed = address(kyle, REPS, CC)
+        to, cc, routed = address(kyle, REPS, CC, ESC)
         self.assertEqual(to, ["kyle.link@circledelivers.com"])
-        self.assertEqual(cc, ["justice.cromwell@circledelivers.com", "smitchell@circledelivers.com", "jack.gibson@circledelivers.com"])
+        self.assertEqual(cc, [BRETT, "jack.gibson@circledelivers.com"])
         self.assertFalse(routed)
-        email = compose(kyle, REPS, cc=CC, now=NOW)
+        email = compose(kyle, REPS, cc=CC, now=NOW, escalate=ESC)
+        self.assertEqual(email.cc, [BRETT, "jack.gibson@circledelivers.com"])
         self.assertEqual(email.subject, "Due-date alert: 1 load due within 48 hours - Kyle Link")
         self.assertTrue(email.text.startswith("Hi Kyle,"))
         self.assertIn("Load 342271  |  AVIS TRUCKS  |  due Wed 10/14 15:20 (calculated)  |  1 d 5 h left", email.text)
@@ -236,13 +245,20 @@ class ComposeTests(unittest.TestCase):
         self.assertIn("Due within 48 hours (1)", email.html)
         self.assertNotIn("dispatch rep", email.text)
 
-    def test_manager_who_is_also_the_rep_is_not_copied_to_herself(self):
+    def test_cc_person_who_is_also_the_rep_is_not_copied_to_himself(self):
+        victoria = self.groups()["Victoria Storm"]
+        reps = dict(REPS)
+        reps["victoria storm"] = {"email": BRETT, "title": "", "phone": ""}
+        to, cc, _ = address(victoria, reps, CC, ESC)
+        self.assertEqual(to, [BRETT])
+        self.assertEqual(cc, [])  # the secondary rep is the same person: not repeated either
+
+    def test_justice_as_the_sales_rep_gets_to_and_only_brett_cc(self):
         victoria = self.groups()["Victoria Storm"]
         reps = dict(REPS)
         reps["victoria storm"] = {"email": "justice.cromwell@circledelivers.com", "title": "", "phone": ""}
-        to, cc, _ = address(victoria, reps, CC)
-        self.assertEqual(to, ["justice.cromwell@circledelivers.com"])
-        self.assertEqual(cc, ["smitchell@circledelivers.com"])  # the secondary rep is the same person: not repeated
+        to, cc, routed = address(victoria, reps, CC, ESC)
+        self.assertEqual((to, cc, routed), (["justice.cromwell@circledelivers.com"], [BRETT], False))
 
     def test_overdue_section_and_calculated_marker(self):
         victoria = self.groups()["Victoria Storm"]
@@ -256,31 +272,45 @@ class ComposeTests(unittest.TestCase):
         self.assertIn("background:#fdecea", email.html)
         self.assertEqual(email.load_ids, ["343502", "344435"])
 
-    def test_rep_without_email_is_routed_to_the_managers(self):
+    def test_rep_without_email_goes_to_all_three(self):
         podge = self.groups()["Podge Ormsby"]
-        email = compose(podge, REPS, cc=CC, now=NOW)
+        email = compose(podge, REPS, cc=CC, now=NOW, escalate=ESC)
         self.assertTrue(email.routed)
-        self.assertEqual(email.to, CC)
+        self.assertEqual(email.to, ESC)
         self.assertEqual(email.cc, [])
         self.assertEqual(email.subject, "Due-date alert: 1 load due within 48 hours (1 past due) - Podge Ormsby (no email on file)")
-        self.assertTrue(email.text.startswith("Hi Justice and Stuart,"))
+        self.assertTrue(email.text.startswith("Hi Justice, Stuart and Brett,"))
         self.assertIn("no email address in reps.csv", email.text)
         self.assertIn("sales rep: Podge Ormsby; dispatch rep: Seth Edmondson", email.text)
 
-    def test_unassigned_loads_go_to_the_managers_with_the_dispatch_rep_shown(self):
+    def test_unassigned_loads_go_to_all_three_with_the_dispatch_rep_shown(self):
         unassigned = self.groups()[None]
-        email = compose(unassigned, REPS, cc=CC, now=NOW)
-        self.assertEqual(email.to, CC)
+        email = compose(unassigned, REPS, cc=CC, now=NOW, escalate=ESC)
+        self.assertEqual(email.to, ESC)
+        self.assertEqual(email.cc, [])
         self.assertEqual(email.subject, "Due-date alert: 1 load due within 48 hours - no sales rep assigned")
+        self.assertTrue(email.text.startswith("Hi Justice, Stuart and Brett,"))
+        self.assertIn("<p>Hi Justice, Stuart and Brett,</p>", email.html)
         self.assertIn("NO sales rep on the load page", email.text)
         self.assertIn("sales rep: none; dispatch rep: Podge Ormsby", email.text)
         self.assertIn("problems flagged: Yes", email.text)
         self.assertIn("Sales / dispatch rep", email.html)
 
-    def test_empty_cc_leaves_nobody_for_unassigned(self):
+    def test_without_an_escalation_list_unassigned_falls_back_to_cc(self):
         unassigned = self.groups()[None]
-        to, cc, routed = address(unassigned, REPS, [])
+        self.assertEqual(address(unassigned, REPS, CC), (CC, [], True))
+
+    def test_empty_escalation_leaves_nobody_for_unassigned(self):
+        unassigned = self.groups()[None]
+        to, cc, routed = address(unassigned, REPS, CC, [])
         self.assertEqual((to, cc, routed), ([], [], True))
+
+    def test_team_greeting(self):
+        self.assertEqual(team_greeting(ESC), "Hi Justice, Stuart and Brett,")
+        self.assertEqual(team_greeting([BRETT]), "Hi Brett,")
+        self.assertEqual(team_greeting(["Justice.Cromwell@circledelivers.com", BRETT]), "Hi Justice and Brett,")
+        self.assertEqual(team_greeting(ESC + ["someone@circledelivers.com"]), "Hi team,")
+        self.assertEqual(team_greeting([]), "Hi team,")
 
 
 class RunTests(unittest.TestCase):
@@ -288,7 +318,7 @@ class RunTests(unittest.TestCase):
         transport = transport or FakeTransport()
         state = AlertState(os.path.join(tmp, "alert_state.json"))
         summary = run_once(
-            parse_grid(page), now=now, hours=48, include_overdue=True, reps=REPS, cc=CC, lookup=lookup,
+            parse_grid(page), now=now, hours=48, include_overdue=True, reps=REPS, cc=CC, escalate=ESC, lookup=lookup,
             rep_cache=RepCache(os.path.join(tmp, "rep_cache.json")), state=state, repeat_hours=repeat_hours,
             transport=transport, from_addr="Circle <vehicles@circledelivers.com>", record=send,
             sent_log=os.path.join(tmp, "sent_log.jsonl") if send else None,
@@ -315,6 +345,12 @@ class RunTests(unittest.TestCase):
                 lines = [json.loads(line) for line in handle]
             self.assertEqual(len(lines), 4)
             self.assertEqual(lines[0]["to"], ["kyle.link@circledelivers.com"])
+            self.assertEqual(lines[0]["cc"], [BRETT, "jack.gibson@circledelivers.com"])
+            self.assertEqual(lines[2]["to"], ["victoria.storm@circledelivers.com"])
+            self.assertEqual(lines[2]["cc"], [BRETT])
+            self.assertEqual(lines[1]["to"], ESC)  # Podge: no email on file
+            self.assertEqual(lines[3]["to"], ESC)  # no sales rep
+            self.assertEqual(lines[3]["cc"], [])
             self.assertEqual(lines[0]["message_id"], "msg-1")
             state = AlertState(os.path.join(tmp, "alert_state.json"))
             self.assertEqual(set(state.sent), {"343502", "344435", "342271", "341217", "341205"})
@@ -358,7 +394,7 @@ class RedirectTests(unittest.TestCase):
         self.assertEqual(email.subject, "[Test copy] Due-date alert: 1 load due within 48 hours - Kyle Link")
         self.assertTrue(email.text.startswith(
             "TEST COPY. This alert would have been sent To: kyle.link@circledelivers.com; "
-            "Cc: justice.cromwell@circledelivers.com, smitchell@circledelivers.com, jack.gibson@circledelivers.com."))
+            "Cc: brett.booth@circledelivers.com, jack.gibson@circledelivers.com."))
         self.assertIn("Hi Kyle,", email.text)
         self.assertIn("loadmaint.mcgi?load_id=342271", email.text)
         self.assertIn("TEST COPY.", email.html)
@@ -416,8 +452,14 @@ class CliTests(unittest.TestCase):
                 text = handle.read()
             self.assertIn("From: Circle Logistics <vehicles@circledelivers.com>", text)
             self.assertIn("To: kyle.link@circledelivers.com", text)
-            self.assertIn("Cc: justice.cromwell@circledelivers.com, smitchell@circledelivers.com", text)
+            self.assertIn("Cc: brett.booth@circledelivers.com\n", text)
+            self.assertNotIn("justice", text.split("\n\n")[0])
             self.assertIn("Subject: Due-date alert: 1 load due within 48 hours - Kyle Link", text)
+            with open(os.path.join(outbox, [f for f in files if f.endswith("_unassigned.txt")][0]), encoding="utf-8") as handle:
+                text = handle.read()
+            self.assertIn("To: justice.cromwell@circledelivers.com, smitchell@circledelivers.com, brett.booth@circledelivers.com\n", text)
+            self.assertNotIn("Cc:", text.split("\n\n")[0])
+            self.assertIn("Hi Justice, Stuart and Brett,", text)
             self.assertFalse(os.path.exists(os.path.join(tmp, "state.json")))
             with open(summary_path, encoding="utf-8") as handle:
                 summary = json.load(handle)
@@ -444,12 +486,14 @@ class LambdaArgsTests(unittest.TestCase):
     def test_env_to_args(self):
         import alerts_lambda
 
-        env = {"ALERT_SEND": "1", "ALERT_HOURS": "36", "ALERT_CC": "a@x.com,b@x.com", "ALERT_SAVE_PAGES": "1", "MAIL_FROM": "Me <me@x.com>"}
+        env = {"ALERT_SEND": "1", "ALERT_HOURS": "36", "ALERT_CC": "a@x.com,b@x.com", "ALERT_ESCALATE_TO": "c@x.com,d@x.com",
+               "ALERT_SAVE_PAGES": "1", "MAIL_FROM": "Me <me@x.com>"}
         args = alerts_lambda.alert_args("/tmp/w", env)
         self.assertIn("--send", args)
         self.assertEqual(args[args.index("--hours") + 1], "36")
         self.assertEqual(args[args.index("--repeat-hours") + 1], "24")
         self.assertEqual(args[args.index("--cc") + 1], "a@x.com,b@x.com")
+        self.assertEqual(args[args.index("--escalate-to") + 1], "c@x.com,d@x.com")
         self.assertEqual(args[args.index("--from") + 1], "Me <me@x.com>")
         self.assertEqual(args[args.index("--reps") + 1], os.path.join("/tmp/w", "config", "reps.csv"))
         self.assertEqual(args[args.index("--save-html") + 1], os.path.join("/tmp/w", "pages"))
@@ -457,6 +501,7 @@ class LambdaArgsTests(unittest.TestCase):
         args = alerts_lambda.alert_args("/tmp/w", {})
         self.assertNotIn("--send", args)
         self.assertNotIn("--cc", args)
+        self.assertNotIn("--escalate-to", args)
         self.assertEqual(args[args.index("--from") + 1], "Circle Logistics <vehicles@circledelivers.com>")
 
 

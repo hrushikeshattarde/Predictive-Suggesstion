@@ -12,9 +12,9 @@ What it does, once per run:
    ``sales_rep`` / ``sales_rep2`` pickers), through a small cache so a load's page is
    fetched once every ``--rep-cache-hours`` rather than every run.
 4. Group the loads by primary sales rep and send one email per rep from the vehicles@
-   group, Cc Justice Cromwell and Stuart Mitchell (``--cc``). Loads with no sales rep, or
-   whose rep has no address in ``reps.csv``, go to the Cc list directly so somebody can
-   route them.
+   group, Cc Brett Booth (``--cc``). Loads with no sales rep, or whose rep has no address
+   in ``reps.csv``, go To Justice Cromwell, Stuart Mitchell and Brett Booth
+   (``--escalate-to``) so somebody can route them.
 5. Remember what was sent (``alert_state.json``): a load is repeated to the same rep only
    after ``--repeat-hours`` (24), or sooner if its due date or its rep changed. Dry runs
    (no ``--send``) write the emails to ``outbox/`` and leave the state alone.
@@ -68,6 +68,7 @@ __all__ = [
     "parse_due",
     "redirect",
     "run_once",
+    "team_greeting",
 ]
 
 SPOT_LOAD_MAP_ID = "1786"
@@ -77,10 +78,21 @@ DEFAULT_REPEAT_HOURS = 24.0
 DEFAULT_REP_CACHE_HOURS = 12.0
 DEFAULT_MAX_LOOKUPS = 150
 DEFAULT_FROM = "Circle Logistics <vehicles@circledelivers.com>"
-#: Copied on every alert. Justice Cromwell's address is the one in reps.csv (from the 8x8
-#: directory); Stuart Mitchell's is the MAIN email on his TransportPro user record
-#: (user 1349, VP of Finished Vehicles).
-DEFAULT_CC = ("justice.cromwell@circledelivers.com", "smitchell@circledelivers.com")
+#: Copied on every email that goes to a sales rep (the user's change, 2026-11-02; until
+#: then it was Justice Cromwell and Stuart Mitchell).
+DEFAULT_CC = ("brett.booth@circledelivers.com",)
+#: Who gets the loads nobody can be alerted for (no sales rep on the load, or a rep with no
+#: address in reps.csv), as To. Justice Cromwell's address is the one in reps.csv (from the
+#: 8x8 directory); Stuart Mitchell's is the MAIN email on his TransportPro user record (user
+#: 1349, VP of Finished Vehicles); Brett Booth's was given by the user.
+DEFAULT_ESCALATE = ("justice.cromwell@circledelivers.com", "smitchell@circledelivers.com", "brett.booth@circledelivers.com")
+#: First names for the greeting on escalated emails. An address not listed here makes the
+#: greeting "Hi team," rather than guessing a name from the address.
+FIRST_NAMES = {
+    "justice.cromwell@circledelivers.com": "Justice",
+    "smitchell@circledelivers.com": "Stuart",
+    "brett.booth@circledelivers.com": "Brett",
+}
 LOAD_URL = f"{BASE_URL}/backoffice/loadmaint.mcgi?load_id="
 #: Group key for loads with no sales rep on the load page.
 UNASSIGNED = ""
@@ -466,14 +478,16 @@ def redirect(email: Email, to: list[str]) -> Email:
                  text=note + "\n\n" + email.text, html=html, load_ids=list(email.load_ids), routed=email.routed)
 
 
-def address(group: RepGroup, reps: dict[str, dict[str, str]], cc: list[str]) -> tuple[list[str], list[str], bool]:
-    """``(to, cc, routed)``. The rep gets To and the managers Cc; when the rep has no
-    address (or the loads have no rep) the managers get To, so the alert is never lost."""
+def address(group: RepGroup, reps: dict[str, dict[str, str]], cc: list[str],
+            escalate: list[str] | None = None) -> tuple[list[str], list[str], bool]:
+    """``(to, cc, routed)``. The rep gets To and ``cc`` gets Cc (plus the secondary sales
+    rep). When the loads have no rep, or the rep has no address, ``escalate`` gets To
+    (``cc`` when ``escalate`` is None), so the alert is never lost."""
 
     rep = reps.get(group.key) if group.key else None
     rep_email = (rep or {}).get("email", "")
     if not rep_email:
-        return _dedupe(list(cc)), [], True
+        return _dedupe(list(escalate if escalate is not None else cc)), [], True
     extra: list[str] = []
     for load in group.loads:
         if load.sales_rep2:
@@ -485,6 +499,18 @@ def address(group: RepGroup, reps: dict[str, dict[str, str]], cc: list[str]) -> 
 
 def _first_name(name: str | None) -> str:
     return (name or "").split()[0] if name else ""
+
+
+def team_greeting(addresses: list[str]) -> str:
+    """``Hi Justice, Stuart and Brett,`` for addresses in :data:`FIRST_NAMES`; ``Hi team,``
+    as soon as one of them is not."""
+
+    names = [FIRST_NAMES.get(a.strip().lower()) for a in addresses]
+    if not names or not all(names):
+        return "Hi team,"
+    if len(names) == 1:
+        return f"Hi {names[0]},"
+    return f"Hi {', '.join(names[:-1])} and {names[-1]},"
 
 
 def _fmt_due(load: DueLoad) -> str:
@@ -555,10 +581,11 @@ TRAILER = (f"This alert is generated from the {SPOT_LOAD_MAP_NAME} and repeats o
            "Reply to this email if a load is mis-assigned.")
 
 
-def compose(group: RepGroup, reps: dict[str, dict[str, str]], *, cc: list[str], now: datetime, hours: float = DEFAULT_HOURS) -> Email:
+def compose(group: RepGroup, reps: dict[str, dict[str, str]], *, cc: list[str], now: datetime, hours: float = DEFAULT_HOURS,
+            escalate: list[str] | None = None) -> Email:
     """Address and write the alert for one rep group (plain text and HTML)."""
 
-    to, cc_list, routed = address(group, reps, cc)
+    to, cc_list, routed = address(group, reps, cc, escalate)
     loads = sorted(group.loads, key=lambda l: (l.due, l.load_id))
     overdue = [l for l in loads if l.is_overdue(now)]
     soon = [l for l in loads if not l.is_overdue(now)]
@@ -575,7 +602,7 @@ def compose(group: RepGroup, reps: dict[str, dict[str, str]], *, cc: list[str], 
     subject = f"Due-date alert: {counts} - {who}"
 
     show_dispatch_rep = routed  # the managers need to know who to hand them to
-    greeting = f"Hi {_first_name(group.name)}," if (group.name and not routed) else "Hi Justice and Stuart,"
+    greeting = f"Hi {_first_name(group.name)}," if (group.name and not routed) else team_greeting(to)
     if group.unassigned:
         intro = (f"As of {_fmt_when(now)}, these loads on the {SPOT_LOAD_MAP_NAME} are due within {int(hours)} hours or already past due "
                  f"and have NO sales rep on the load page, so nobody was alerted directly. Please assign a rep or get them covered.")
@@ -757,6 +784,7 @@ def run_once(
     max_lookups: int = DEFAULT_MAX_LOOKUPS,
     redirect_to: list[str] | None = None,
     only_rep: str | None = None,
+    escalate: list[str] | None = None,
     log: Callable[[str], None] = lambda m: None,
 ) -> dict[str, Any]:
     """Select, look up, group, compose, send. ``record=False`` (dry run) leaves the alert
@@ -790,11 +818,11 @@ def run_once(
         if not fresh:
             log(f"{label}: {len(group.loads)} load(s), all alerted within the last {int(repeat_hours)} h; nothing sent")
             continue
-        email = compose(RepGroup(group.key, group.name, fresh), reps, cc=cc, now=now, hours=hours)
+        email = compose(RepGroup(group.key, group.name, fresh), reps, cc=cc, now=now, hours=hours, escalate=escalate)
         if redirect_to:
             email = redirect(email, redirect_to)
         if not email.to:
-            log(f"{label}: nobody to send to (empty --cc?); held")
+            log(f"{label}: nobody to send to (empty --escalate-to?); held")
             continue
         try:
             message_id = transport.send(email, from_addr)
@@ -850,7 +878,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-overdue", action="store_true", help="leave out loads already past their due date")
     parser.add_argument("--saved-id", default=SPOT_LOAD_MAP_ID, help="CargoTel saved search id (default 1786, Spot Load Map)")
     parser.add_argument("--reps", default=os.path.join(PARENT, "reps.csv"), help="reps.csv: name,email[,title][,phone] (default ../reps.csv)")
-    parser.add_argument("--cc", default=",".join(DEFAULT_CC), help="comma-separated addresses copied on every alert")
+    parser.add_argument("--cc", default=",".join(DEFAULT_CC), help="comma-separated addresses copied on every email to a sales rep (default Brett Booth)")
+    parser.add_argument("--escalate-to", default=",".join(DEFAULT_ESCALATE),
+                        help="comma-separated addresses that get, as To, the loads with no sales rep or a rep missing from reps.csv "
+                             "(default Justice Cromwell, Stuart Mitchell, Brett Booth)")
     parser.add_argument("--from", dest="from_addr", default=os.environ.get("MAIL_FROM", DEFAULT_FROM), help="verified SES sender")
     parser.add_argument("--send", action="store_true", help="really send through SES; otherwise write to --outbox and keep the state untouched")
     parser.add_argument("--redirect-to", metavar="ADDR[,ADDR]", help="send every email to these addresses instead, as a marked test copy; nothing is recorded")
@@ -874,7 +905,8 @@ def main(argv: list[str] | None = None) -> int:
 
     now = datetime.fromisoformat(args.now) if args.now else datetime.now().replace(microsecond=0)
     cc = [a.strip() for a in args.cc.split(",") if a.strip()]
-    redirect_to = [a.strip() for a in (args.redirect_to or "").split(",") if a.strip()] or None
+    escalate = [a.strip() for a in args.escalate_to.split(",") if a.strip()]
+    redirect_to =[a.strip() for a in (args.redirect_to or "").split(",") if a.strip()] or None
     record = args.send and not redirect_to
 
     def log(message: str) -> None:
@@ -906,9 +938,10 @@ def main(argv: list[str] | None = None) -> int:
 
     reps = load_rep_details(args.reps)
     if not reps:
-        log(f"warning: no reps read from {args.reps}; every alert will go to the Cc list")
+        log(f"warning: no reps read from {args.reps}; every alert will go to the escalation list")
     transport = SesTransport(args.region, args.configuration_set) if args.send else FileTransport(args.outbox)
     log(f"{'SENDING via SES' if args.send else 'dry run to ' + args.outbox + '/'} as {args.from_addr}; cc {', '.join(cc) or '(none)'}; "
+        f"no rep -> {', '.join(escalate) or '(nobody)'}; "
         f"window {args.hours:g} h; repeat after {args.repeat_hours:g} h"
         + (f"; TEST COPIES redirected to {', '.join(redirect_to)}, nothing recorded" if redirect_to else "")
         + (f"; only {args.only_rep}" if args.only_rep else ""))
@@ -916,7 +949,7 @@ def main(argv: list[str] | None = None) -> int:
         grid, now=now, hours=args.hours, include_overdue=not args.no_overdue, reps=reps, cc=cc, lookup=lookup,
         rep_cache=rep_cache, state=AlertState(args.state), repeat_hours=args.repeat_hours, transport=transport,
         from_addr=args.from_addr, record=record, sent_log=args.sent_log if record else None,
-        max_lookups=args.max_lookups, redirect_to=redirect_to, only_rep=args.only_rep, log=log,
+        max_lookups=args.max_lookups, redirect_to=redirect_to, only_rep=args.only_rep, escalate=escalate, log=log,
     )
     log(f"done: {summary['due']} due, {len(summary['emails'])} email(s), {summary['skipped_repeat']} load(s) already alerted, "
         f"{len(summary['lookup_errors'])} lookup error(s)")

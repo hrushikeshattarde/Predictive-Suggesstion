@@ -39,7 +39,10 @@ param(
     [string]$MailFrom = "Circle Logistics <vehicles@circledelivers.com>",
     [string]$SesIdentity = "vehicles@circledelivers.com",
     [string]$ConfigurationSet = "",
+    # Empty = the defaults in due_date_alerts.py (Cc Brett Booth; no-rep loads To Justice
+    # Cromwell, Stuart Mitchell and Brett Booth). Comma-separated to override.
     [string]$Cc = "",
+    [string]$EscalateTo = "",
     [int]$Hours = 48,
     [int]$RepeatHours = 20,
     [int]$MemoryMb = 512,
@@ -150,7 +153,7 @@ foreach ($p in @("state/", "outbox/", "pages/")) {
 }
 $repsKey = (Invoke-Aws s3api list-objects-v2 --bucket $Bucket --prefix "config/reps.csv" --query "Contents[].Key" --output text).Trim()
 if ($repsKey -ne "config/reps.csv") {
-    Write-Warning "s3://$Bucket/config/reps.csv is missing: every alert would go to the Cc list. Upload it with ..\deploy\deploy.ps1 -UploadConfig."
+    Write-Warning "s3://$Bucket/config/reps.csv is missing: every alert would go to Justice, Stuart and Brett. Upload it with ..\deploy\deploy.ps1 -UploadConfig."
 }
 
 # ---------------------------------------------------------------- Lambda role
@@ -182,6 +185,7 @@ $vars["ALERT_REPEAT_HOURS"] = [string]$RepeatHours
 $vars["MAIL_FROM"] = $MailFrom
 $vars["TZ"] = "America/New_York"
 if ($Cc) { $vars["ALERT_CC"] = $Cc }
+if ($EscalateTo) { $vars["ALERT_ESCALATE_TO"] = $EscalateTo }
 if ($ConfigurationSet) { $vars["SES_CONFIGURATION_SET"] = $ConfigurationSet }
 $envFile = Join-Path $Build "env.json"
 Write-Utf8 $envFile (@{ Variables = $vars } | ConvertTo-Json -Compress)
