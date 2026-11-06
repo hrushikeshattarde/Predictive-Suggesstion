@@ -65,7 +65,7 @@ Kesh: Tracking Update Screen (2077), Pickup ETA filter dropped, rep + customer c
    │  minus the excluded customers (--exclude-customer: Merchants Automotive)
    ▼
 GPS history per load (48 h, as the  active   last ping within 4 h (--stale-hours)   -> last ping written as a dispatch comment
-link shows it)                       stale    last ping older than 4 h               -> email
+link shows it)                       stale    last ping older than 4 h               -> last ping written as a comment (once) AND email
                                      never    no ping in the window                  -> email
                                      unknown  page unreadable                        -> logged only
    ▼
@@ -80,8 +80,12 @@ alert_state.json, comment_state.json a load repeats after 4 h (--repeat-hours) w
 
 The comment is the ping as CargoTel prints it plus the place, `2026-11-06 06:12:25-05
 Oak Lawn, IL`, the format Justice already types by hand (seen on load 352242). It is
-skipped when the load's last dispatch comment already contains that ping's timestamp, by
-anyone, or when `comment_state.json` says the job wrote it.
+written for every load that has a ping, whether the driver is still pinging or went
+quiet more than 4 hours ago (asked for on 2026-11-06: a quiet driver's last known position
+belongs on the load too, and the load is still in the alert). It is skipped when the load's
+last dispatch comment already contains that ping's timestamp, by anyone, or when
+`comment_state.json` says the job wrote it, so a quiet driver's unchanged last ping is
+written once, not every hour.
 
 Each email has a plain-text and an HTML part with one section per state ("No GPS pings",
 "GPS stopped more than 4 h ago"), its instruction, and a table per section: load, customer,
@@ -175,7 +179,8 @@ limited to those loads), `--max-gps` (400), `--save-html DIR`, `--now ISO`, `--j
   day: a driver who is not pinging is a same-day problem. Change with `--repeat-hours`.
 - **A ping is written once.** The job compares the ping's timestamp with the load's last
   dispatch comment and with its own record, so running every hour does not fill the
-  comments with the same position.
+  comments with the same position. That is what keeps the quiet drivers' comments to one
+  per last ping while their alerts repeat every 4 hours.
 - **A load whose GPS page cannot be read is never emailed or commented**; it is logged
   and counted as unreadable.
 - **Loads with no pickup ETA are not on the screen** (the saved filter excludes them), so

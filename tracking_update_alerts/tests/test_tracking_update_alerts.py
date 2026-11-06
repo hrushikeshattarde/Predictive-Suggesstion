@@ -222,6 +222,15 @@ REPS = {
     "kaleb hamman": {"email": "kaleb.hamman@circledelivers.com", "title": "", "phone": "", "manager": "justice.cromwell@circledelivers.com"},
 }
 SELECTED = ["352242", "352243", "354745", "360001", "360002", "360003", "360006", "360009", "360010"]
+#: What a run writes as dispatch comments: the last ping of every active or stale load that
+#: does not carry it yet (360006 already does; 354745 and 360002 never pinged; 360009 is unreadable).
+STALE_AND_ACTIVE_COMMENTS = {
+    "352242": "2026-11-06 06:12:25-05 Oak Lawn, IL",
+    "352243": "2026-11-05 14:00:00-05 Rockford, IL",
+    "360001": "2026-11-06 04:30:00-05 Columbia, MO",
+    "360003": "2026-11-03 12:00:00-05 Ogden, UT",
+    "360010": "2026-11-06 01:00:00-05 Gary, IN",
+}
 
 
 def fetch_gps(load):
@@ -431,14 +440,15 @@ class CommentTests(unittest.TestCase):
         self.assertEqual(comment_text(ping), "2026-11-06 06:12:25-05 Oak Lawn, IL")
         self.assertLessEqual(len(comment_text(Ping(when=NOW, where="x" * 300, who="x", stamp="s"))), 255)
 
-    def test_plan_comments_only_for_active_loads_without_that_ping(self):
+    def test_plan_comments_for_every_load_with_a_ping_not_on_the_load_yet(self):
         loads, _w, _c, _e = checked_loads()
         comments = plan_comments(loads)
-        self.assertEqual(comments, {"352242": "2026-11-06 06:12:25-05 Oak Lawn, IL"})
+        self.assertEqual(comments, STALE_AND_ACTIVE_COMMENTS)
         loads = by_id(loads)
-        self.assertFalse(needs_comment(loads["360006"]))  # last comment already carries the ping
-        self.assertFalse(needs_comment(loads["352243"]))  # stale
-        self.assertFalse(needs_comment(loads["354745"]))  # never
+        self.assertFalse(needs_comment(loads["360006"]))  # active, but the last comment already carries the ping
+        self.assertTrue(needs_comment(loads["352243"]))  # stale: the last known position is still worth a comment
+        self.assertFalse(needs_comment(loads["354745"]))  # never: nothing to write
+        self.assertFalse(needs_comment(loads["360009"]))  # unknown
         state = CommentState(None)
         state.mark("352242", "2026-11-06 06:12:25-05", "whatever", NOW)
         self.assertFalse(needs_comment(loads["352242"], state))
@@ -671,13 +681,15 @@ class RunTests(unittest.TestCase):
         summary, transport, poster = self.run_once()
         self.assertEqual(summary["selected"], 9)
         self.assertEqual(summary["by_state"], {ACTIVE: 2, STALE: 4, NEVER: 2, UNKNOWN: 1})
-        self.assertEqual(summary["comments_planned"], 1)
+        self.assertEqual(summary["comments_planned"], 5)
         self.assertEqual(summary["comments_written"], 0)
         self.assertEqual(poster.calls, [])
         dumps = [f for f in os.listdir(self.outbox) if f.endswith("_comments.txt")]
         self.assertEqual(len(dumps), 1)
         with open(os.path.join(self.outbox, dumps[0]), encoding="utf-8") as handle:
-            self.assertIn("352242 | 2026-11-06 06:12:25-05 Oak Lawn, IL | Tsolmon Tsogtsaikhan | 100 Miles Transport LLC", handle.read())
+            dump = handle.read()
+        self.assertIn("352242 | 2026-11-06 06:12:25-05 Oak Lawn, IL | Tsolmon Tsogtsaikhan | 100 Miles Transport LLC", dump)
+        self.assertIn("352243 | 2026-11-05 14:00:00-05 Rockford, IL | Erdenetuvshin Oyunbaatar | 100 Miles Transport LLC", dump)
         self.assertEqual(len(transport.sent), 6)
         self.assertEqual(sorted(e["group"] for e in summary["emails"]),
                          ["Jack Gibson|Victoria Storm", "Kyle Link|Kyle Link", "Podge Ormsby|Podge Ormsby", "Victoria Storm|nobody",
@@ -691,33 +703,38 @@ class RunTests(unittest.TestCase):
 
     def test_live_run_posts_comments_sends_and_remembers(self):
         summary, transport, poster = self.run_once(record=True, post_comments=True)
-        self.assertEqual(poster.calls, [{"352242": "2026-11-06 06:12:25-05 Oak Lawn, IL"}])
-        self.assertEqual((summary["comments_written"], summary["comments_failed"]), (1, 0))
+        self.assertEqual(poster.calls, [STALE_AND_ACTIVE_COMMENTS])
+        self.assertEqual((summary["comments_written"], summary["comments_failed"]), (5, 0))
         self.assertEqual(self.comment_state.written("352242"), "2026-11-06 06:12:25-05")
+        self.assertEqual(self.comment_state.written("352243"), "2026-11-05 14:00:00-05")  # the quiet driver's last position
         self.assertTrue(os.path.exists(self.comment_state.path))
         self.assertEqual(len(transport.sent), 6)
         self.assertEqual(sorted(self.state.sent), ["352243", "354745", "360001", "360002", "360003", "360010"])
+        self.assertIn("352243", [l for e, _f in transport.sent for l in e.load_ids])  # commented AND in the alert
         with open(self.sent_log, encoding="utf-8") as handle:
             entries = [json.loads(line) for line in handle]
         self.assertEqual(len(entries), 6)
         self.assertTrue(all(e["sent"] for e in entries))
-        # the next run an hour later: the ping is already on the load, every alert is inside the repeat window
+        # the next run an hour later: every ping is already on its load, every alert is inside the repeat window
         summary2, transport2, poster2 = self.run_once(record=True, post_comments=True, now=NOW + timedelta(hours=1))
         self.assertEqual(poster2.calls, [])
         self.assertEqual(len(transport2.sent), 0)
         self.assertEqual(summary2["skipped_repeat"], 6)
-        # five hours later everything repeats
-        summary3, transport3, _p = self.run_once(record=True, post_comments=True, now=NOW + timedelta(hours=5))
+        # five hours later the alerts repeat, the comments do not (same last pings)
+        summary3, transport3, poster3 = self.run_once(record=True, post_comments=True, now=NOW + timedelta(hours=5))
         self.assertEqual(len(transport3.sent), 6)
+        self.assertEqual(poster3.calls, [])
 
     def test_comment_failures_are_counted_and_do_not_stop_the_emails(self):
         summary, transport, _p = self.run_once(record=True, post_comments=True, poster=FakePoster(fail=["352242"]))
-        self.assertEqual((summary["comments_written"], summary["comments_failed"]), (0, 1))
+        self.assertEqual((summary["comments_written"], summary["comments_failed"]), (4, 1))
         self.assertIsNone(self.comment_state.written("352242"))
+        self.assertEqual(self.comment_state.written("360001"), "2026-11-06 04:30:00-05")
         self.assertEqual(len(transport.sent), 6)
+        self.comment_state.entries.clear()
         summary, transport, _p = self.run_once(record=True, post_comments=True, poster=FakePoster(explode=True))
         self.assertIn("rejected", summary["comment_error"])
-        self.assertEqual(summary["comments_failed"], 1)
+        self.assertEqual(summary["comments_failed"], 5)
 
     def test_redirect_and_only_rep(self):
         summary, transport, _p = self.run_once(record=True, redirect_to=["me@circledelivers.com"])
@@ -732,7 +749,7 @@ class RunTests(unittest.TestCase):
     def test_only_loads_limits_the_whole_run(self):
         summary, transport, poster = self.run_once(record=True, post_comments=True, only_loads={"352242", "360001", "999999"})
         self.assertEqual(summary["selected"], 2)
-        self.assertEqual(poster.calls, [{"352242": "2026-11-06 06:12:25-05 Oak Lawn, IL"}])
+        self.assertEqual(poster.calls, [{"352242": "2026-11-06 06:12:25-05 Oak Lawn, IL", "360001": "2026-11-06 04:30:00-05 Columbia, MO"}])
         self.assertEqual([e.subject for e, _f in transport.sent], ["GPS tracking alert: 1 load not pinging for more than 4 h - Kyle Link"])
         self.assertEqual(sorted(self.state.sent), ["360001"])
 
@@ -741,13 +758,13 @@ class RunTests(unittest.TestCase):
         page = build(replace={"352242": merchants, "360010": merchants})
         summary, transport, poster = self.run_once(record=True, post_comments=True, page=page)
         self.assertEqual(summary["counts"]["excluded"], 2)
-        self.assertEqual(poster.calls, [])  # the only pinging load with a new ping was Merchants
+        self.assertEqual(sorted(poster.calls[0]), ["352243", "360001", "360003"])  # neither Merchants load is commented
         self.assertNotIn("Jack Gibson|Victoria Storm", [e["group"] for e in summary["emails"]])
         self.assertEqual(len(transport.sent), 5)
         # the same run with the exclusion off: the Merchants loads come back (the other five groups are inside the repeat window)
         summary, transport, poster = self.run_once(record=True, post_comments=True, page=page, exclude_customers=())
         self.assertEqual(summary["counts"]["excluded"], 0)
-        self.assertEqual(poster.calls, [{"352242": "2026-11-06 06:12:25-05 Oak Lawn, IL"}])
+        self.assertEqual(poster.calls, [{"352242": "2026-11-06 06:12:25-05 Oak Lawn, IL", "360010": "2026-11-06 01:00:00-05 Gary, IN"}])
         self.assertEqual([e["group"] for e in summary["emails"]], ["Jack Gibson|Victoria Storm"])
         self.assertEqual(summary["skipped_repeat"], 5)
 
@@ -797,7 +814,7 @@ class CliTests(unittest.TestCase):
         with open(out, encoding="utf-8") as handle:
             data = json.load(handle)
         self.assertEqual(data["by_state"], {ACTIVE: 2, STALE: 4, NEVER: 2, UNKNOWN: 1})
-        self.assertEqual(data["comments"], {"352242": "2026-11-06 06:12:25-05 Oak Lawn, IL"})
+        self.assertEqual(data["comments"], STALE_AND_ACTIVE_COMMENTS)
         self.assertEqual(len(data["loads"]), 9)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "outbox")))
 

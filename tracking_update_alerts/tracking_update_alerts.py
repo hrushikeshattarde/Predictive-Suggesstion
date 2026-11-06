@@ -23,8 +23,10 @@ What it does, once per run:
      place go into the load's "Dispatch Comment (Add)" box, in the format the team
      already uses by hand (``2026-11-05 10:19:29-05 Burnsville, MN``), unless the load's
      last dispatch comment already carries that ping;
-   * **stale**: pings exist but the last one is older than ``--stale-hours``;
-   * **never**: no ping at all in the window;
+   * **stale**: pings exist but the last one is older than ``--stale-hours``. The last
+     ping is written as a comment the same way (once: it does not change while the
+     driver is quiet) AND the load is emailed;
+   * **never**: no ping at all in the window: emailed, nothing to comment;
    * **unknown**: the GPS page could not be read (logged, never emailed).
 
    Loads of an excluded customer (``--exclude-customer``; Merchants Automotive Group
@@ -570,10 +572,12 @@ def comment_text(ping: Ping) -> str:
 
 
 def needs_comment(load: GpsLoad, state: CommentState | None = None) -> bool:
-    """An active load gets its last ping as a comment unless the load's last dispatch
-    comment already carries that ping (by anyone) or the job wrote it earlier."""
+    """A load with a ping, whether the driver is still pinging (active) or went quiet
+    (stale), gets its last ping as a comment unless the load's last dispatch comment
+    already carries that ping (by anyone) or the job wrote it earlier. A stale load is
+    emailed as well; since its last ping does not change, the comment is written once."""
 
-    if load.tracking != ACTIVE or load.last_ping is None:
+    if load.tracking not in (ACTIVE, STALE) or load.last_ping is None:
         return False
     stamp = load.last_ping.stamp
     if stamp and stamp in load.last_comment:
@@ -584,7 +588,8 @@ def needs_comment(load: GpsLoad, state: CommentState | None = None) -> bool:
 
 
 def plan_comments(loads: list[GpsLoad], state: CommentState | None = None) -> dict[str, str]:
-    """``{load_id: comment}`` for the active loads whose last ping is not on the load yet."""
+    """``{load_id: comment}`` for the active and stale loads whose last ping is not on the
+    load yet."""
 
     return {l.load_id: comment_text(l.last_ping) for l in loads if needs_comment(l, state) and l.last_ping}
 
@@ -985,7 +990,8 @@ def _html_rows(loads: list[GpsLoad], now: datetime, *, gps_days: int, show_reps:
 
 
 FOOTNOTE = ("GPS pings come from each load's \"GPS City/St Link\" on the tracking screen (the driver app's position history). "
-            "Loads whose driver is pinging get their last position written into the dispatch comments automatically.")
+            "Every load with a ping gets its last position written into the dispatch comments automatically, whether the driver "
+            "is still pinging or has gone quiet; a load with no ping at all gets no comment.")
 
 
 def _trailer(repeat_hours: float) -> str:
@@ -1267,7 +1273,7 @@ def run_once(
                                "warnings": warnings, "gps_errors": gps_errors, "comments": {}, "comments_planned": 0,
                                "comments_written": 0, "comments_failed": 0, "emails": [], "skipped_repeat": 0}
 
-    # 1. dispatch comments for the loads that are pinging
+    # 1. dispatch comments for every load with a ping (still pinging or gone quiet)
     comments = plan_comments(loads, comment_state)
     summary["comments_planned"] = len(comments)
     if comments and post_comments and poster is not None:
