@@ -46,3 +46,12 @@ duplicate_check/outbox/
 duplicate_check/pages/
 duplicate_check/build/
 duplicate_check/dist/
+
+# tracking_update_alerts: local state and dry-run output
+tracking_update_alerts/alert_state.json
+tracking_update_alerts/comment_state.json
+tracking_update_alerts/sent_log.jsonl
+tracking_update_alerts/outbox/
+tracking_update_alerts/pages/
+tracking_update_alerts/build/
+tracking_update_alerts/dist/

@@ -350,11 +350,11 @@ class SendAllTests(unittest.TestCase):
                              "STORM, VICTORIA,victoria@example.com,Senior Account Manager,260-208-4500 ext. 1212\n"
                              "CROMWELL, JUSTICE,justice@example.com,(260) 204-3067,Sales Rep\n")
             details = load_rep_details(path)
-        self.assertEqual(details["stuart mitchell"], {"email": "stuart@example.com", "title": "Sales Manager", "phone": ""})
-        self.assertEqual(details["angelica haney"], {"email": "angelica@example.com", "title": "", "phone": ""})
-        self.assertEqual(details["kyle link"], {"email": "kyle@example.com", "title": "", "phone": ""})
-        self.assertEqual(details["victoria storm"], {"email": "victoria@example.com", "title": "Senior Account Manager", "phone": "260-208-4500 ext. 1212"})
-        self.assertEqual(details["justice cromwell"], {"email": "justice@example.com", "title": "Sales Rep", "phone": "(260) 204-3067"})  # phone and title in either order
+        self.assertEqual(details["stuart mitchell"], {"email": "stuart@example.com", "title": "Sales Manager", "phone": "", "manager": ""})
+        self.assertEqual(details["angelica haney"], {"email": "angelica@example.com", "title": "", "phone": "", "manager": ""})
+        self.assertEqual(details["kyle link"], {"email": "kyle@example.com", "title": "", "phone": "", "manager": ""})
+        self.assertEqual(details["victoria storm"], {"email": "victoria@example.com", "title": "Senior Account Manager", "phone": "260-208-4500 ext. 1212", "manager": ""})
+        self.assertEqual(details["justice cromwell"], {"email": "justice@example.com", "title": "Sales Rep", "phone": "(260) 204-3067", "manager": ""})  # phone and title in either order
         self.assertEqual(rep_signature_for("Victoria Storm", details), {"email": "victoria@example.com", "title": "Senior Account Manager", "phone": "260-208-4500 ext. 1212"})
         self.assertEqual(rep_signature_for("Stuart Mitchell", details), {"email": "stuart@example.com", "title": "Sales Manager"})
         self.assertEqual(rep_signature_for("ANGELICA HANEY", details), {"email": "angelica@example.com"})

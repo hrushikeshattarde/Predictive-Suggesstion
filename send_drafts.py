@@ -116,13 +116,15 @@ def _looks_like_phone(cell: str) -> bool:
 
 
 def load_rep_details(path: str) -> dict[str, dict[str, str]]:
-    """``reps.csv`` -> {name key: {"email", "title", "phone"}}.
+    """``reps.csv`` -> {name key: {"email", "title", "phone", "manager"}}.
 
     Columns: ``name,email[,title][,phone]`` (header optional, ``#`` lines ignored). CargoTel
     names carry a comma ("LINK, KYLE"); unquoted, that splits the name into two fields, so
     the row is read around the email: the first field containing ``@`` is the email and
     everything before it is the name. Of the fields after it, one that looks like a phone
-    number is the phone and the first other non-empty one is the title, in either order.
+    number is the phone, the first one with an ``@`` is the rep's manager (``manager``,
+    used by the tracking-update alerts; empty otherwise) and the first other non-empty
+    one is the title, in either order.
     """
 
     reps: dict[str, dict[str, str]] = {}
@@ -140,11 +142,13 @@ def load_rep_details(path: str) -> dict[str, dict[str, str]]:
                 continue
             rest = [c.strip() for c in row[at + 1:] if c.strip()]
             phone = next((c for c in rest if _looks_like_phone(c)), "")
-            others = [c for c in rest if c != phone]
+            manager = next((c for c in rest if "@" in c), "")
+            others = [c for c in rest if c != phone and "@" not in c]
             reps[_name_key(name)] = {
                 "email": row[at].strip(),
                 "title": others[0] if others else "",
                 "phone": phone,
+                "manager": manager,
             }
     return reps
 

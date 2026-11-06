@@ -1,0 +1,1488 @@
+"""Tracking-update alerts: check the GPS pings of every load on Operations Reports > Kesh:
+Tracking Update Screen, write the last ping into the dispatch comments of the loads that
+are pinging, and email the dispatch rep, the sales rep and the sales rep's manager about
+the loads that are not.
+
+What it does, once per run:
+
+1. Pull the saved search (id 2077): the Dispatched loads whose carrier was added in the
+   last 90 days, with the sales rep and customer columns added. The screen's own
+   "Pickup ETA before <date>" filter cannot be moved from a URL (CargoTel crashes on
+   the mnemonic), but sending only the date parts of that filter drops it, so the job
+   pulls the unfiltered set and applies the rule locally: pickup ETA before
+   ``today + --days-ahead`` (2) at midnight, which is the date the screen is meant to
+   carry each day (Nov 8 on Nov 6, Nov 9 on Nov 7, ...). Verified 2026-11-06: the local
+   rule reproduces the saved screen's 93 rows exactly.
+2. Open every load's "GPS City/St Link" (``gpshistory.mcgi``) for the last
+   ``--gps-days`` (2: the same 48-hour window the page shows when a rep clicks the link,
+   so the job never sees a ping the rep would not) and read the ping table (user,
+   timestamp with UTC offset, city/state).
+3. Sort the loads:
+
+   * **active**: the last ping is within ``--stale-hours`` (4). The last ping's time and
+     place go into the load's "Dispatch Comment (Add)" box, in the format the team
+     already uses by hand (``2026-11-05 10:19:29-05 Burnsville, MN``), unless the load's
+     last dispatch comment already carries that ping;
+   * **stale**: pings exist but the last one is older than ``--stale-hours``;
+   * **never**: no ping at all in the window;
+   * **unknown**: the GPS page could not be read (logged, never emailed).
+
+   Loads of an excluded customer (``--exclude-customer``; Merchants Automotive Group
+   Holdings LLC by default) are left out of the run altogether: no comment, no email.
+4. Email the stale and never loads, grouped: for Stellantis loads (customer id 62943) one
+   email per dispatch rep, To the dispatch rep and ``stellantisob@circledelivers.com``;
+   for every other customer one email per (dispatch rep, sales rep), To both, Cc the
+   sales rep's manager from ``reps.csv`` (its ``manager`` column) and the secondary
+   sales rep. Groups with the same recipients are merged. When nobody can be addressed
+   the escalation list (``--escalate-to``) gets the email with the reps named per load.
+5. Remember what was done: a load is re-alerted after ``--repeat-hours`` (4) while it
+   stays stale, or at once when its state or owners change; a ping is written as a
+   comment once. Dry runs (no ``--send`` / ``--post-comments``) write the emails and the
+   comments to ``outbox/`` and leave the state alone.
+
+Usage::
+
+    python tracking_update_alerts.py --list                    # the loads and their GPS state, nothing done
+    python tracking_update_alerts.py                           # dry run: emails + comments to outbox/
+    python tracking_update_alerts.py --post-comments           # comments into CargoTel, emails still to outbox/
+    python tracking_update_alerts.py --send --post-comments    # live
+    python tracking_update_alerts.py --from-html pages/grid.html --gps-dir pages/gps   # offline
+
+The CargoTel modules (``cargotel_search``, ``suggest_reloads``, ``send_drafts``) live one
+folder up and the email plumbing is shared with ``due_date_alerts``; both are on
+``sys.path`` so this runs from here and from the flat Lambda zip alike.
+"""
+
+from __future__ import annotations
+
+import argparse
+import html as html_lib
+import json
+import os
+import re
+import sys
+from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PARENT = os.path.dirname(HERE)
+for _path in (PARENT, os.path.join(PARENT, "due_date_alerts")):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from cargotel_search import (  # noqa: E402
+    BASE_URL,
+    SEARCH_URL,
+    CargoTelSession,
+    Grid,
+    GridRow,
+    SearchParams,
+    _BROWSER_HEADERS,
+    is_signin_page,
+    parse_grid,
+)
+from due_date_alerts import (  # noqa: E402
+    DEFAULT_FROM,
+    Email,
+    FileTransport,
+    SesTransport,
+    _dedupe,
+    _first_name,
+    _fmt_when,
+    append_log,
+    redirect,
+)
+from send_drafts import _name_key, load_rep_details  # noqa: E402
+from suggest_reloads import nice_name  # noqa: E402
+
+__all__ = [
+    "ACTIVE", "NEVER", "STALE", "UNKNOWN",
+    "AlertState", "CommentState", "GpsLoad", "MailGroup", "OutboxTransport", "Ping",
+    "build_comment_post", "check_gps", "classify", "comment_text", "compose", "customer_excluded", "eta_cutoff", "form_fields",
+    "gps_params", "grid_params", "load_from_row", "mail_groups", "main", "needs_comment", "nice_place",
+    "parse_ping_stamp", "parse_pings", "parse_stamp", "plan_comments", "run_once", "select_loads", "verify_comments",
+]
+
+SEARCH_ID = "2077"
+SEARCH_NAME = "Kesh: Tracking Update Screen"
+SEARCH_PATH = "Operations Reports > Kesh: Tracking Update Screen"
+GPS_URL = f"{BASE_URL}/backoffice/gpshistory.mcgi"
+LOAD_URL = f"{BASE_URL}/backoffice/loadmaint.mcgi?load_id="
+#: The screen's date: pickup ETA before today + this many days (at midnight).
+DEFAULT_DAYS_AHEAD = 2
+#: A driver whose last ping is older than this is "not pinging".
+DEFAULT_STALE_HOURS = 4.0
+#: How far back the GPS history is asked for: 2 days, the page's own default window, so a
+#: load reads "no GPS pings" exactly when the link shows an empty table. (A wider window
+#: turned up pings from before the pickup on loads whose link showed nothing, 2026-11-06.)
+DEFAULT_GPS_DAYS = 2
+#: A load that stays stale is alerted again after this long.
+DEFAULT_REPEAT_HOURS = 4.0
+DEFAULT_STATUSES = ("Dispatched",)
+DEFAULT_MAX_GPS = 400
+#: Stellantis loads go to the dispatch rep and this mailbox, nobody else.
+DEFAULT_STELLANTIS_TO = ("stellantisob@circledelivers.com",)
+STELLANTIS_CUSTOMER_IDS = ("62943",)
+_STELLANTIS_RE = re.compile(r"stellantis|\bfca\b", re.I)
+#: Where an alert goes when neither rep can be addressed (same list as the pickup-ETA job).
+DEFAULT_ESCALATE = ("justice.cromwell@circledelivers.com", "smitchell@circledelivers.com")
+#: Customers left out of the whole run (no comments, no emails): a customer id, or a
+#: case-insensitive part of the customer name. Merchants Automotive Group Holdings LLC
+#: (id 81464) at the user's request, 2026-11-06.
+DEFAULT_EXCLUDE_CUSTOMERS = ("81464", "Merchants Automotive")
+#: Columns added to the saved view on the GET (extras only, see cargotel_search notes):
+#: the sales reps, and the customer. ``consignor`` reads "N/A" on EDI loads (every
+#: Stellantis load); ``original_consignor`` and ``cons_id`` carry the real customer.
+EXTRA_VIEW_FIELDS = ("sales_rep1", "sales_rep2", "original_consignor", "cons_id", "consignor")
+REQUIRED_COLUMNS = ("pickiup_eta_datetime", "GPSLink", "DispatchCmt_IDLastCmt", "dispatch_rep", "status")
+UNASSIGNED = ""
+
+ACTIVE = "active"
+STALE = "stale"
+NEVER = "never"
+UNKNOWN = "unknown"
+
+_STAMP_RE = re.compile(r"^\s*(\d{1,2}/\d{1,2}/\d{4})(?:\s+(\d{1,2}:\d{2}))?")
+_PING_STAMP_RE = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\s*([+-])(\d{2}):?(\d{2})?)?")
+_HREF_RE = re.compile(r'href="([^"]+)"', re.I)
+_TABLE_RE = re.compile(r"<table\b.*?</table>", re.S | re.I)
+_TR_RE = re.compile(r"<tr\b.*?</tr>", re.S | re.I)
+_TD_RE = re.compile(r"<td\b[^>]*>(.*?)</td>", re.S | re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def parse_stamp(text: str | None) -> datetime | None:
+    """``"11/06/2026 20:00"`` -> naive datetime (CargoTel's clock, Eastern); else ``None``."""
+
+    if not text:
+        return None
+    match = _STAMP_RE.match(text)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(f"{match.group(1)} {match.group(2) or '00:00'}", "%m/%d/%Y %H:%M")
+    except ValueError:
+        return None
+
+
+def parse_ping_stamp(text: str | None, default_tz: Any = None) -> datetime | None:
+    """``"2026-11-06 06:12:25-05"`` -> aware datetime (UTC-5). A stamp with no offset gets
+    ``default_tz`` (the run's local zone)."""
+
+    if not text:
+        return None
+    match = _PING_STAMP_RE.search(text)
+    if not match:
+        return None
+    try:
+        naive = datetime.strptime(f"{match.group(1)} {match.group(2)}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    if match.group(3):
+        offset = timedelta(hours=int(match.group(4)), minutes=int(match.group(5) or 0))
+        return naive.replace(tzinfo=timezone(-offset if match.group(3) == "-" else offset))
+    if default_tz is not None:
+        return naive.replace(tzinfo=default_tz)
+    return naive.astimezone()
+
+
+def nice_place(text: str | None) -> str:
+    """``"Oak Lawn,IL "`` -> ``"Oak Lawn, IL"``."""
+
+    text = " ".join((text or "").split())
+    return re.sub(r"\s*,\s*", ", ", text).strip(", ")
+
+
+def ago_text(hours: float) -> str:
+    """``0.3`` -> ``"just now"``; ``5.6`` -> ``"6 h ago"``; ``50`` -> ``"2 d 2 h ago"``."""
+
+    whole = int(hours + 0.5)
+    if whole <= 0:
+        return "just now"
+    days, rem = divmod(whole, 24)
+    if not days:
+        return f"{rem} h ago"
+    if not rem:
+        return f"{days} d ago"
+    return f"{days} d {rem} h ago"
+
+
+def _plain(text: str | None) -> str:
+    return " ".join((text or "").split())
+
+
+def eta_cutoff(now: datetime, days_ahead: int = DEFAULT_DAYS_AHEAD) -> datetime:
+    """The screen's date as a naive midnight: loads with a pickup ETA before it are in."""
+
+    day = now.date() + timedelta(days=days_ahead)
+    return datetime(day.year, day.month, day.day)
+
+
+# --------------------------------------------------------------------------- #
+# GPS pings                                                                    #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class Ping:
+    when: datetime  # aware
+    where: str  # "Oak Lawn, IL"
+    who: str
+    stamp: str  # as CargoTel prints it: "2026-11-06 06:12:25-05"
+
+    def to_record(self) -> dict[str, str]:
+        return {"when": self.when.isoformat(), "where": self.where, "who": self.who, "stamp": self.stamp}
+
+
+def parse_pings(html: str, default_tz: Any = None) -> list[Ping]:
+    """The ping table of a ``gpshistory.mcgi`` page (the one whose header says
+    Timestamp), oldest first. Rows that do not parse are skipped."""
+
+    table = next((t for t in _TABLE_RE.findall(html) if "Timestamp" in t), None)
+    if table is None:
+        return []
+    pings: list[Ping] = []
+    for row in _TR_RE.findall(table)[1:]:
+        cells = [_plain(html_lib.unescape(_TAG_RE.sub(" ", c))) for c in _TD_RE.findall(row)]
+        if len(cells) < 3:
+            continue
+        when = parse_ping_stamp(cells[1], default_tz)
+        if when is None:
+            continue
+        pings.append(Ping(when=when, where=nice_place(cells[2]), who=cells[0], stamp=cells[1]))
+    pings.sort(key=lambda p: p.when)
+    return pings
+
+
+def gps_params(load_id: str, start: datetime, end: datetime) -> dict[str, str]:
+    """The ``gpshistory.mcgi`` query for one load and an explicit window (the form's
+    select names; CargoTel honours them on a GET, verified 2026-11-06)."""
+
+    out = {"load_id": load_id}
+    for tag, when in (("start", start), ("end", end)):
+        out.update({
+            f"gpshistory_form__month_{tag}_date": str(when.month),
+            f"gpshistory_form__day_{tag}_date": str(when.day),
+            f"gpshistory_form__year_{tag}_date": str(when.year),
+            f"gpshistory_form__hour_{tag}_date": str(when.hour),
+            f"gpshistory_form__minute_{tag}_date": str(when.minute),
+        })
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# The loads                                                                    #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class GpsLoad:
+    load_id: str
+    kind: str  # "load" (bundle parent) or "order"
+    customer: str
+    customer_id: str
+    dispatch_rep: str | None
+    status: str
+    carrier: str
+    origin: str
+    dest: str
+    dest_name: str
+    pickup_eta: datetime | None
+    pickup_eta_text: str
+    driver: str
+    driver_phone: str
+    gps_url: str
+    current_location: str
+    last_comment_at: str
+    last_comment_by: str
+    last_comment: str
+    sales_rep: str | None = None
+    sales_rep2: str | None = None
+    pings: list[Ping] = field(default_factory=list)
+    gps_error: str = ""
+    gps_checked: bool = False
+    tracking: str = ""  # active | stale | never | unknown
+
+    @property
+    def url(self) -> str:
+        return LOAD_URL + self.load_id
+
+    @property
+    def lane(self) -> str:
+        return f"{self.origin or '?'} -> {self.dest or '?'}"
+
+    @property
+    def is_stellantis(self) -> bool:
+        return self.customer_id in STELLANTIS_CUSTOMER_IDS or bool(_STELLANTIS_RE.search(self.customer or ""))
+
+    @property
+    def dispatch_key(self) -> str:
+        return _name_key(self.dispatch_rep) if self.dispatch_rep else UNASSIGNED
+
+    @property
+    def sales_key(self) -> str:
+        return _name_key(self.sales_rep) if self.sales_rep else UNASSIGNED
+
+    @property
+    def group_key(self) -> tuple[str, str]:
+        return (self.dispatch_key, "stellantis") if self.is_stellantis else (self.dispatch_key, self.sales_key)
+
+    @property
+    def last_ping(self) -> Ping | None:
+        return self.pings[-1] if self.pings else None
+
+    def hours_since_ping(self, now: datetime) -> float | None:
+        ping = self.last_ping
+        if ping is None:
+            return None
+        return (now - ping.when).total_seconds() / 3600
+
+    def to_record(self, now: datetime) -> dict[str, Any]:
+        record = asdict(self)
+        record["pickup_eta"] = self.pickup_eta.isoformat(timespec="minutes") if self.pickup_eta else None
+        record["pings"] = len(self.pings)
+        record["last_ping"] = self.last_ping.to_record() if self.last_ping else None
+        since = self.hours_since_ping(now)
+        record["hours_since_ping"] = round(since, 1) if since is not None else None
+        record["is_stellantis"] = self.is_stellantis
+        record["url"] = self.url
+        return record
+
+
+def _customer_of(row: GridRow) -> tuple[str, str]:
+    """``(name, id)`` from the added customer columns: ``original_consignor`` (the real
+    customer, also on EDI loads where ``consignor`` reads N/A) with ``consignor`` as the
+    fallback."""
+
+    name = _plain(row.text("original_consignor"))
+    if not name or name.upper() == "N/A":
+        name = _plain(row.text("consignor"))
+    if name.upper() == "N/A":
+        name = ""
+    return name, _plain(row.text("cons_id"))
+
+
+def load_from_row(row: GridRow) -> GpsLoad:
+    """One grid row -> a :class:`GpsLoad` (no GPS check yet)."""
+
+    dest_lines = [l for l in row.lines("destination") if l.strip()]
+    if not dest_lines:
+        dest_name, dest = "", ""
+    elif len(dest_lines) > 1:
+        dest_name, dest = dest_lines[0], dest_lines[-1]
+    else:
+        dest_name, dest = "", dest_lines[0]
+    gps_cell = row.cells.get("GPSLink")
+    href = _HREF_RE.search(gps_cell.html) if gps_cell else None
+    gps_url = html_lib.unescape(href.group(1)) if href else ""
+    if gps_url.startswith("/"):
+        gps_url = BASE_URL + gps_url
+    comment_lines = [l for l in row.lines("DispatchCmt_IDLastCmt") if l.strip()]
+    customer, customer_id = _customer_of(row)
+    eta_text = _plain(row.text("pickiup_eta_datetime"))
+    reps: dict[str, Any] = {}
+    if "sales_rep1" in row.cells:
+        reps = {"sales_rep": _plain(row.text("sales_rep1")) or None, "sales_rep2": _plain(row.text("sales_rep2")) or None}
+    return GpsLoad(
+        load_id=row.load_id or "",
+        kind="load" if row.link_class == "LinkBundleParent" else "order",
+        customer=customer,
+        customer_id=customer_id,
+        dispatch_rep=_plain(row.text("dispatch_rep")) or None,
+        status=_plain(row.text("status")),
+        carrier=_plain(row.text("carriername")) or re.sub(r"^Carrier:\s*", "", _plain(row.section), flags=re.I),
+        origin=_plain(row.text("originCityState")),
+        dest=_plain(dest),
+        dest_name=_plain(dest_name),
+        pickup_eta=parse_stamp(eta_text),
+        pickup_eta_text=eta_text,
+        driver=_plain(row.text("driver_name")),
+        driver_phone=_plain(row.text("driver_cell_phone")),
+        gps_url=gps_url,
+        current_location=_plain(row.text("currentlocation")),
+        last_comment_at=_plain(comment_lines[0]) if comment_lines else "",
+        last_comment_by=_plain(comment_lines[1]) if len(comment_lines) > 1 else "",
+        last_comment=_plain(" ".join(comment_lines[2:])) if len(comment_lines) > 2 else "",
+        **reps,
+    )
+
+
+def customer_excluded(load: GpsLoad, patterns: tuple[str, ...] | list[str]) -> bool:
+    """True when the load's customer matches one of ``patterns``: an all-digit pattern is
+    a customer id, anything else a case-insensitive part of the customer name."""
+
+    name = (load.customer or "").lower()
+    for pattern in patterns:
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+        if pattern.isdigit():
+            if load.customer_id == pattern:
+                return True
+        elif pattern.lower() in name:
+            return True
+    return False
+
+
+def select_loads(
+    grid: Grid,
+    now: datetime,
+    *,
+    days_ahead: int = DEFAULT_DAYS_AHEAD,
+    statuses: tuple[str, ...] | list[str] = DEFAULT_STATUSES,
+    exclude_customers: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_CUSTOMERS,
+) -> tuple[list[GpsLoad], list[str], dict[str, int]]:
+    """The loads the screen is meant to show: in ``statuses`` with a pickup ETA before
+    :func:`eta_cutoff`, minus the customers in ``exclude_customers``. Returns ``(loads,
+    warnings, counts)`` with counts ``rows``, ``in_status``, ``excluded``, ``no_eta``,
+    ``eta_later``, ``selected``. Refuses to run when the grid lacks a column the job
+    reads."""
+
+    missing = [key for key in REQUIRED_COLUMNS if key not in grid.column_keys]
+    if missing:
+        raise RuntimeError(f"the {SEARCH_NAME} grid lacks column(s) {', '.join(missing)}; check the saved view in CargoTel")
+    cutoff = eta_cutoff(now, days_ahead)
+    wanted = {s.strip().lower() for s in statuses if s.strip()}
+    counts = {"rows": 0, "in_status": 0, "excluded": 0, "no_eta": 0, "eta_later": 0, "selected": 0}
+    warnings: list[str] = []
+    picked: list[GpsLoad] = []
+    for row in grid.rows:
+        if not row.load_id or row.link_class == "LinkBundleChild":
+            continue
+        counts["rows"] += 1
+        load = load_from_row(row)
+        if wanted and load.status.lower() not in wanted:
+            continue
+        counts["in_status"] += 1
+        if customer_excluded(load, exclude_customers):
+            counts["excluded"] += 1
+            continue
+        if load.pickup_eta is None:
+            counts["no_eta"] += 1
+            if load.pickup_eta_text:
+                warnings.append(f"load {load.load_id}: unreadable pickup ETA {load.pickup_eta_text!r}; skipped")
+            continue
+        if load.pickup_eta >= cutoff:
+            counts["eta_later"] += 1
+            continue
+        if not load.gps_url:
+            warnings.append(f"load {load.load_id}: no GPS link in its row")
+        picked.append(load)
+    counts["selected"] = len(picked)
+    picked.sort(key=lambda l: (l.dispatch_key or "~", l.pickup_eta or datetime.max, l.load_id))
+    return picked, warnings, counts
+
+
+# --------------------------------------------------------------------------- #
+# GPS check                                                                    #
+# --------------------------------------------------------------------------- #
+
+
+def classify(load: GpsLoad, now: datetime, stale_hours: float = DEFAULT_STALE_HOURS) -> str:
+    if load.gps_error:
+        return UNKNOWN
+    since = load.hours_since_ping(now)
+    if since is None:
+        return NEVER
+    return STALE if since > stale_hours else ACTIVE
+
+
+def gps_fetcher(session: CargoTelSession, now: datetime, gps_days: int = DEFAULT_GPS_DAYS) -> Callable[[GpsLoad], str]:
+    """Live GPS pages: the load's link with the window set to the last ``gps_days`` (the
+    page's own default is 48 hours from the moment it is opened)."""
+
+    def fetch(load: GpsLoad) -> str:
+        if not load.gps_url:
+            raise RuntimeError("no GPS link")
+        url = load.gps_url.split("?", 1)[0]
+        params = gps_params(load.load_id, now - timedelta(days=gps_days), now + timedelta(days=1))
+        status, html = session.get(url, params)
+        if is_signin_page(html, status):
+            session.cookie(refresh=True)
+            status, html = session.get(url, params)
+        if status != 200:
+            raise RuntimeError(f"gpshistory.mcgi returned HTTP {status}")
+        if is_signin_page(html, status):
+            raise RuntimeError("CargoTel answered with the sign-in page; the session cookie is stale")
+        return html
+
+    return fetch
+
+
+def dir_fetcher(folder: str) -> Callable[[GpsLoad], str]:
+    """Offline GPS pages: ``<folder>/gps_<load>.html``."""
+
+    def fetch(load: GpsLoad) -> str:
+        with open(os.path.join(folder, f"gps_{load.load_id}.html"), encoding="utf-8") as handle:
+            return handle.read()
+
+    return fetch
+
+
+def check_gps(
+    loads: list[GpsLoad],
+    fetch: Callable[[GpsLoad], str] | None,
+    now: datetime,
+    *,
+    stale_hours: float = DEFAULT_STALE_HOURS,
+    max_checks: int = DEFAULT_MAX_GPS,
+    save_html: str | None = None,
+    log: Callable[[str], None] = lambda m: None,
+) -> list[str]:
+    """Read every load's GPS history and set ``pings`` and ``tracking``. Returns the
+    errors; a load whose page failed is ``unknown`` and never emailed or commented."""
+
+    errors: list[str] = []
+    for n, load in enumerate(loads):
+        if fetch is None:
+            load.gps_error = "no GPS lookup available"
+        elif n >= max_checks:
+            load.gps_error = f"GPS cap of {max_checks} loads reached"
+        else:
+            try:
+                html = fetch(load)
+                if save_html:
+                    os.makedirs(save_html, exist_ok=True)
+                    with open(os.path.join(save_html, f"gps_{load.load_id}.html"), "w", encoding="utf-8") as handle:
+                        handle.write(html)
+                load.pings = parse_pings(html, now.tzinfo)
+                load.gps_checked = True
+            except Exception as exc:  # noqa: BLE001 - one bad page must not sink the run
+                load.gps_error = str(exc)
+        if load.gps_error:
+            errors.append(f"load {load.load_id}: {load.gps_error}")
+            log(f"GPS check failed for {load.load_id}: {load.gps_error}")
+        load.tracking = classify(load, now, stale_hours)
+    return errors
+
+
+# --------------------------------------------------------------------------- #
+# Dispatch comments                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def comment_text(ping: Ping) -> str:
+    """``"2026-11-06 06:12:25-05 Oak Lawn, IL"``: the ping as CargoTel prints it, the
+    format the team already types by hand (255 characters max in the box)."""
+
+    return f"{ping.stamp} {ping.where}"[:255]
+
+
+def needs_comment(load: GpsLoad, state: CommentState | None = None) -> bool:
+    """An active load gets its last ping as a comment unless the load's last dispatch
+    comment already carries that ping (by anyone) or the job wrote it earlier."""
+
+    if load.tracking != ACTIVE or load.last_ping is None:
+        return False
+    stamp = load.last_ping.stamp
+    if stamp and stamp in load.last_comment:
+        return False
+    if state is not None and state.written(load.load_id) == stamp:
+        return False
+    return True
+
+
+def plan_comments(loads: list[GpsLoad], state: CommentState | None = None) -> dict[str, str]:
+    """``{load_id: comment}`` for the active loads whose last ping is not on the load yet."""
+
+    return {l.load_id: comment_text(l.last_ping) for l in loads if needs_comment(l, state) and l.last_ping}
+
+
+_FIELD_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>(?:(.*?)</\1\s*>)?", re.I | re.S)
+_OPTION_RE = re.compile(r"<option\b([^>]*)>", re.I)
+_ATTR = {name: re.compile(rf'\b{name}="([^"]*)"', re.I) for name in ("name", "value", "type")}
+
+
+def _attr(attrs: str, name: str) -> str | None:
+    match = _ATTR[name].search(attrs)
+    return html_lib.unescape(match.group(1)) if match else None
+
+
+def form_fields(form_html: str) -> list[tuple[str, str]]:
+    """Every successful control of a form as ``(name, value)`` pairs in document order,
+    the way a browser would post it: hidden and text inputs, checked boxes and radios,
+    the selected option(s) of each select (the first option when none is marked, nothing
+    for an empty multi-select), every textarea. Buttons are left out."""
+
+    out: list[tuple[str, str]] = []
+    for match in _FIELD_RE.finditer(form_html):
+        tag, attrs, body = match.group(1).lower(), match.group(2), match.group(3) or ""
+        name = _attr(attrs, "name")
+        if not name:
+            continue
+        if tag == "input":
+            kind = (_attr(attrs, "type") or "text").lower()
+            if kind in ("submit", "button", "image", "reset", "file"):
+                continue
+            if kind in ("checkbox", "radio") and not re.search(r"\bchecked\b", attrs, re.I):
+                continue
+            out.append((name, _attr(attrs, "value") or ""))
+        elif tag == "select":
+            options = _OPTION_RE.findall(body)
+            chosen = [o for o in options if re.search(r"\bselected\b", o, re.I)]
+            if chosen:
+                out.extend((name, _attr(o, "value") or "") for o in chosen)
+            elif options and not re.search(r"\bmultiple\b", attrs, re.I):
+                out.append((name, _attr(options[0], "value") or ""))
+        else:  # textarea
+            out.append((name, html_lib.unescape(_TAG_RE.sub("", body))))
+    return out
+
+
+def build_comment_post(page_html: str, comments: dict[str, str]) -> list[tuple[str, str]]:
+    """The POST body that adds ``comments`` (``{load_id: text}``) through the grid's own
+    form: the ``Menu_alt`` form of the fetched page, every field as the browser would
+    send it, with the "Dispatch Comment (Add)" box of each load filled in and the Submit
+    button pressed. Raises when the page has no such form or a load has no box."""
+
+    match = re.search(r'<form\s+name="Menu_alt"', page_html, re.I)
+    if not match:
+        raise RuntimeError("no Menu_alt form on the page; cannot add dispatch comments")
+    start = match.start()
+    end = re.compile(r"</form\s*>", re.I).search(page_html, start)
+    form = page_html[start:end.start() if end else len(page_html)]
+    boxes = {f"Control__DispatchCmt_ID__{load_id}__comment": text for load_id, text in comments.items()}
+    data: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name, value in form_fields(form):
+        if name == "Menu__is_submitted":
+            continue
+        if name in boxes:
+            value = boxes[name]
+            seen.add(name)
+        data.append((name, value))
+    missing = sorted(set(boxes) - seen)
+    if missing:
+        raise RuntimeError("no Dispatch Comment (Add) box on the page for load(s) "
+                           + ", ".join(m.split("__")[2] for m in missing))
+    data.append(("Menu__is_submitted", "Submit"))
+    return data
+
+
+def session_post(session: CargoTelSession, url: str, data: list[tuple[str, str]], timeout: float = 300.0) -> tuple[int, str]:
+    """POST a form with the session cookie (``CargoTelSession`` only knows GET)."""
+
+    import requests
+
+    headers = {**_BROWSER_HEADERS, "cookie": f"cgt-browser-session={session.cookie()}", "origin": BASE_URL, "referer": url}
+    response = requests.post(url, headers=headers, data=data, timeout=timeout)
+    return response.status_code, response.text
+
+
+def verify_comments(grid: Grid, comments: dict[str, str]) -> dict[str, bool]:
+    """Which comments show as the load's last dispatch comment on a re-fetched grid."""
+
+    rows = {row.load_id: row for row in grid.rows if row.load_id}
+    out: dict[str, bool] = {}
+    for load_id, text in comments.items():
+        row = rows.get(load_id)
+        last = _plain(" ".join(row.lines("DispatchCmt_IDLastCmt"))) if row else ""
+        out[load_id] = bool(row) and _plain(text) in last
+    return out
+
+
+class CommentState:
+    """``comment_state.json``: ``{"written": {load_id: {"ping", "text", "at"}}}``, the last
+    ping the job wrote on each load, so a run never writes the same ping twice."""
+
+    def __init__(self, path: str | None) -> None:
+        self.path = path
+        self.entries: dict[str, dict[str, str]] = {}
+        if path and os.path.exists(path):
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            self.entries = data.get("written", {}) if isinstance(data, dict) else {}
+
+    def written(self, load_id: str) -> str | None:
+        return (self.entries.get(load_id) or {}).get("ping")
+
+    def mark(self, load_id: str, ping: str, text: str, now: datetime) -> None:
+        self.entries[load_id] = {"ping": ping, "text": text, "at": now.isoformat(timespec="seconds")}
+
+    def prune(self, now: datetime, keep_days: int = 60) -> None:
+        cutoff = now - timedelta(days=keep_days)
+        for load_id in list(self.entries):
+            try:
+                at = datetime.fromisoformat(self.entries[load_id]["at"])
+                if at.tzinfo is None and now.tzinfo is not None:
+                    at = at.replace(tzinfo=now.tzinfo)
+                if at < cutoff:
+                    del self.entries[load_id]
+            except (KeyError, ValueError, TypeError):
+                del self.entries[load_id]
+
+    def save(self) -> None:
+        if not self.path:
+            return
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump({"updated": datetime.now().isoformat(timespec="seconds"), "written": self.entries}, handle, indent=2)
+        os.replace(tmp, self.path)
+
+
+# --------------------------------------------------------------------------- #
+# Who gets the email                                                           #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class MailGroup:
+    """One email. Groups that resolve to the same To and Cc are merged, so a rep gets
+    one email per run."""
+
+    to: list[str]
+    cc: list[str]
+    routed: bool
+    stellantis: bool
+    notes: list[str] = field(default_factory=list)
+    dispatch_reps: list[str] = field(default_factory=list)  # nice names, first seen first
+    sales_reps: list[str] = field(default_factory=list)
+    greet_names: list[str] = field(default_factory=list)
+    loads: list[GpsLoad] = field(default_factory=list)
+    keys: set[tuple[str, str]] = field(default_factory=set)
+
+    @property
+    def unassigned(self) -> bool:
+        return not self.dispatch_reps and not self.sales_reps
+
+    @property
+    def key(self) -> str:
+        head = "stellantis|" if self.stellantis else ""
+        return head + f"{'+'.join(self.dispatch_reps) or 'nobody'}|{'+'.join(self.sales_reps) or 'nobody'}"
+
+    @property
+    def label(self) -> str:
+        who = f"{', '.join(self.dispatch_reps) or 'no dispatch rep'} / {', '.join(self.sales_reps) or 'no sales rep'}"
+        return ("Stellantis: " if self.stellantis else "") + who
+
+    @property
+    def who(self) -> str:
+        return ", ".join(self.dispatch_reps) or ", ".join(self.sales_reps)
+
+    def matches(self, wanted: str) -> bool:
+        if wanted == "unassigned":
+            return self.unassigned
+        if wanted == "stellantis":
+            return self.stellantis
+        return any(wanted in key for key in self.keys)
+
+
+def _rep_email(name: str | None, reps: dict[str, dict[str, str]]) -> str:
+    return reps.get(_name_key(name), {}).get("email", "") if name else ""
+
+
+def _which(loads: list[GpsLoad]) -> str:
+    ids = [l.load_id for l in loads]
+    return "the load" if not ids else (f"load {ids[0]}" if len(ids) == 1 else f"loads {', '.join(ids)}")
+
+
+def address_regular(
+    dispatch_rep: str | None, sales_rep: str | None, loads: list[GpsLoad], reps: dict[str, dict[str, str]],
+    *, escalate: list[str], default_manager: list[str],
+) -> tuple[list[str], list[str], bool, list[str]]:
+    """``(to, cc, routed, notes)``: the dispatch rep and the sales rep get To, the sales
+    rep's manager (``reps.csv`` ``manager`` column, else ``default_manager``) and the
+    secondary sales rep Cc. Nobody addressable -> ``escalate`` gets To (``routed``)."""
+
+    to: list[str] = []
+    cc: list[str] = []
+    notes: list[str] = []
+    which = _which(loads)
+    for role, name in (("dispatch rep", dispatch_rep), ("sales rep", sales_rep)):
+        if not name:
+            notes.append(f"no {role} on {which}")
+            continue
+        email = _rep_email(name, reps)
+        if email:
+            to.append(email)
+        else:
+            notes.append(f"{role} {nice_name(name)} has no email in reps.csv")
+    if sales_rep:
+        manager = reps.get(_name_key(sales_rep), {}).get("manager", "")
+        if manager:
+            cc.extend(a.strip() for a in manager.split(";") if a.strip())
+        elif _rep_email(sales_rep, reps):
+            if default_manager:
+                cc.extend(default_manager)
+            else:
+                notes.append(f"no manager set for {nice_name(sales_rep)} in reps.csv")
+    cc.extend(_rep_email(l.sales_rep2, reps) for l in loads if l.sales_rep2)
+    to = _dedupe(to)
+    if not to:
+        return _dedupe(list(escalate)), [], True, notes
+    return to, _dedupe(cc, exclude=to), False, notes
+
+
+def address_stellantis(
+    dispatch_rep: str | None, loads: list[GpsLoad], reps: dict[str, dict[str, str]], *, stellantis_to: list[str],
+) -> tuple[list[str], list[str], bool, list[str]]:
+    """Stellantis loads: To the dispatch rep and the Stellantis mailbox, nobody in Cc.
+    With no addressable dispatch rep the mailbox still gets it, with a note."""
+
+    notes: list[str] = []
+    to: list[str] = []
+    if not dispatch_rep:
+        notes.append(f"no dispatch rep on {_which(loads)}")
+    else:
+        email = _rep_email(dispatch_rep, reps)
+        if email:
+            to.append(email)
+        else:
+            notes.append(f"dispatch rep {nice_name(dispatch_rep)} has no email in reps.csv")
+    routed = not to
+    return _dedupe(to + list(stellantis_to)), [], routed, notes
+
+
+def mail_groups(
+    loads: list[GpsLoad],
+    reps: dict[str, dict[str, str]],
+    *,
+    stellantis_to: list[str] | tuple[str, ...] = DEFAULT_STELLANTIS_TO,
+    escalate: list[str] | tuple[str, ...] = DEFAULT_ESCALATE,
+    default_manager: list[str] | tuple[str, ...] = (),
+) -> list[MailGroup]:
+    """Group the loads (Stellantis per dispatch rep; the rest per dispatch rep and sales
+    rep), address each group and merge the ones with the same recipients, in first-seen
+    order."""
+
+    by_key: dict[tuple[str, str], list[GpsLoad]] = {}
+    for load in loads:
+        by_key.setdefault(load.group_key, []).append(load)
+    out: list[MailGroup] = []
+    by_recipients: dict[tuple[bool, bool, frozenset[str], frozenset[str]], MailGroup] = {}
+    for key, members in by_key.items():
+        first = members[0]
+        if first.is_stellantis:
+            to, cc, routed, notes = address_stellantis(first.dispatch_rep, members, reps, stellantis_to=list(stellantis_to))
+        else:
+            to, cc, routed, notes = address_regular(first.dispatch_rep, first.sales_rep, members, reps,
+                                                    escalate=list(escalate), default_manager=list(default_manager))
+        rkey = (first.is_stellantis, routed, frozenset(a.lower() for a in to), frozenset(a.lower() for a in cc))
+        group = by_recipients.get(rkey)
+        if group is None:
+            group = by_recipients[rkey] = MailGroup(to=list(to), cc=list(cc), routed=routed, stellantis=first.is_stellantis)
+            out.append(group)
+        names = [first.dispatch_rep] + ([] if first.is_stellantis else [first.sales_rep])
+        for lst, name in zip((group.dispatch_reps, group.sales_reps), names):
+            nice = nice_name(name) if name else ""
+            if nice and nice not in lst:
+                lst.append(nice)
+        for name in names:
+            short = _first_name(nice_name(name)) if name else ""
+            if name and _rep_email(name, reps) and short and short not in group.greet_names:
+                group.greet_names.append(short)
+        for note in notes:
+            if note not in group.notes:
+                group.notes.append(note)
+        group.loads.extend(members)
+        group.keys.add(key)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# The email                                                                    #
+# --------------------------------------------------------------------------- #
+
+
+def _sections(stale_hours: float, gps_days: int) -> tuple[tuple[str, str, str, str], ...]:
+    hours = f"{stale_hours:g}"
+    return (
+        (NEVER, "No GPS pings", "with no GPS pings",
+         f"The tracking app has not reported a position for this driver in the last {gps_days} days. Call the driver "
+         "(or the carrier) to get the app running and get a location, then add it as a dispatch comment on the load."),
+        (STALE, f"GPS stopped more than {hours} h ago", f"not pinging for more than {hours} h",
+         f"The driver was pinging but the last position is older than {hours} hours. Call the driver for a location "
+         "update, get the app back on, and add the location as a dispatch comment on the load."),
+    )
+
+
+def _subject_counts(loads: list[GpsLoad], sections: tuple[tuple[str, str, str, str], ...]) -> str:
+    n = len(loads)
+    head = f"{n} load{'s' if n != 1 else ''}"
+    parts = [(sum(1 for l in loads if l.tracking == kind), phrase) for kind, _title, phrase, _hint in sections]
+    parts = [(count, phrase) for count, phrase in parts if count]
+    if len(parts) == 1 and parts[0][0] == n:
+        return f"{head} {parts[0][1]}"
+    return f"{head} ({', '.join(f'{count} {phrase}' for count, phrase in parts)})"
+
+
+def _fmt_eta(when: datetime | None, fallback: str = "none") -> str:
+    if when is None:
+        return fallback
+    return when.strftime("%a %m/%d %H:%M") if (when.hour or when.minute) else when.strftime("%a %m/%d")
+
+
+def _local(when: datetime, now: datetime) -> datetime:
+    return when.astimezone(now.tzinfo) if now.tzinfo else when
+
+
+def _fmt_ping(ping: Ping, now: datetime) -> str:
+    return f"{_local(ping.when, now):%a %m/%d %H:%M} {ping.where}".strip() + f" ({ago_text((now - ping.when).total_seconds() / 3600)})"
+
+
+def _last_ping_text(load: GpsLoad, now: datetime, gps_days: int) -> str:
+    if load.last_ping is None:
+        return f"none in the last {gps_days} days"
+    return _fmt_ping(load.last_ping, now)
+
+
+def _text_block(load: GpsLoad, now: datetime, *, gps_days: int, show_reps: bool) -> str:
+    head = (f"{'Load' if load.kind == 'load' else 'Order'} {load.load_id}  |  {load.customer or 'customer ?'}  |  "
+            f"last GPS ping: {_last_ping_text(load, now, gps_days)}")
+    lines = [head, f"  {load.origin or '?'} -> {load.dest_name + ', ' if load.dest_name else ''}{load.dest or '?'}"]
+    carrier = load.carrier or "carrier ?"
+    if load.driver:
+        carrier += f"  |  driver {nice_name(load.driver)}" + (f" {load.driver_phone}" if load.driver_phone else "")
+    lines.append("  " + carrier)
+    lines.append(f"  pickup ETA {_fmt_eta(load.pickup_eta)}"
+                 + (f"  |  current location (CargoTel): {load.current_location}" if load.current_location else ""))
+    if load.last_comment:
+        by = nice_name(load.last_comment_by) if load.last_comment_by else "?"
+        lines.append(f"  last dispatch comment ({load.last_comment_at}, {by}): {load.last_comment}")
+    if show_reps:
+        lines.append(f"  dispatch rep: {nice_name(load.dispatch_rep) if load.dispatch_rep else 'none'}; "
+                     f"sales rep: {nice_name(load.sales_rep) if load.sales_rep else 'none'}")
+    lines.append("  " + load.url + "  |  GPS: " + (load.gps_url or "n/a"))
+    return "\n".join(lines)
+
+
+def _html_rows(loads: list[GpsLoad], now: datetime, *, gps_days: int, show_reps: bool) -> str:
+    esc = html_lib.escape
+    out = []
+    for load in loads:
+        carrier = esc(load.carrier or "?")
+        if load.driver:
+            carrier += (f"<br><small>driver {esc(nice_name(load.driver))}"
+                        + (f" {esc(load.driver_phone)}" if load.driver_phone else "") + "</small>")
+        if load.last_ping is None:
+            ping_cell = f'<b style="color:#b00020">none in the last {gps_days} days</b>'
+        else:
+            local = _local(load.last_ping.when, now)
+            ping_cell = (f'<b style="color:#b00020">{esc(local.strftime("%a %m/%d %H:%M"))}</b> {esc(load.last_ping.where)}'
+                         f'<br><small>{esc(ago_text((now - load.last_ping.when).total_seconds() / 3600))}</small>')
+        comment = ""
+        if load.last_comment:
+            comment = (f"{esc(load.last_comment)}<br><small>{esc(load.last_comment_at)}"
+                       + (f", {esc(nice_name(load.last_comment_by))}" if load.last_comment_by else "") + "</small>")
+        cells = [
+            f'<a href="{esc(load.url)}">{esc(load.load_id)}</a>' + ("" if load.kind == "load" else "<br><small>order</small>"),
+            esc(load.customer or ""),
+            f"{esc(load.origin)}<br>&rarr; {esc(load.dest)}" + (f"<br><small>{esc(load.dest_name)}</small>" if load.dest_name else ""),
+            carrier,
+            esc(_fmt_eta(load.pickup_eta)),
+            ping_cell + (f'<br><a href="{esc(load.gps_url)}">GPS history</a>' if load.gps_url else ""),
+            esc(load.current_location),
+            comment,
+        ]
+        if show_reps:
+            cells.append(esc(nice_name(load.dispatch_rep) if load.dispatch_rep else "none") + "<br><small>sales: "
+                         + esc(nice_name(load.sales_rep) if load.sales_rep else "none") + "</small>")
+        out.append("<tr>" + "".join(
+            f'<td style="padding:4px 8px;border-bottom:1px solid #ddd;vertical-align:top">{c}</td>' for c in cells) + "</tr>")
+    return "\n".join(out)
+
+
+FOOTNOTE = ("GPS pings come from each load's \"GPS City/St Link\" on the tracking screen (the driver app's position history). "
+            "Loads whose driver is pinging get their last position written into the dispatch comments automatically.")
+
+
+def _trailer(repeat_hours: float) -> str:
+    return (f"This alert is generated from {SEARCH_NAME} ({SEARCH_PATH}) and repeats every {repeat_hours:g} hours while a load's "
+            "driver is still not pinging. It stops as soon as pings resume or the load leaves the screen. Reply to this email if a "
+            "load is mis-assigned.")
+
+
+def compose(group: MailGroup, *, now: datetime, stale_hours: float = DEFAULT_STALE_HOURS, gps_days: int = DEFAULT_GPS_DAYS,
+            repeat_hours: float = DEFAULT_REPEAT_HOURS) -> Email:
+    """The alert for one addressed group, plain text and HTML: one section per state."""
+
+    sections = _sections(stale_hours, gps_days)
+    loads = sorted(group.loads, key=lambda l: (l.pickup_eta or datetime.max, l.load_id))
+    if group.unassigned:
+        who_text = "no rep assigned"
+    elif group.routed:
+        who_text = f"{group.who} (no email on file)"
+    else:
+        who_text = group.who
+    prefix = "Stellantis GPS tracking alert" if group.stellantis else "GPS tracking alert"
+    subject = f"{prefix}: {_subject_counts(loads, sections)} - {who_text}"
+
+    names = group.greet_names
+    greeting = (f"Hi {' and '.join(names) if len(names) <= 2 else ', '.join(names[:-1]) + ' and ' + names[-1]},"
+                if (names and not group.routed) else "Hi all,")
+    intro = (f"As of {_fmt_when(now)}, the drivers on these {'Stellantis ' if group.stellantis else ''}loads on {SEARCH_NAME} "
+             f"({SEARCH_PATH}) are not pinging. Please get a location update from each driver.")
+    if group.routed:
+        intro += (" Nobody could be emailed directly (" + "; ".join(group.notes) + "), so this alert comes to you instead; "
+                  "the reps are named per load below.")
+    elif group.notes:
+        intro += " Note: " + "; ".join(group.notes) + "."
+
+    show_reps = group.routed or len(group.dispatch_reps) + len(group.sales_reps) > 2
+    placed: list[tuple[str, str, list[GpsLoad]]] = []
+    for kind, title, _phrase, hint in sections:
+        members = [l for l in loads if l.tracking == kind]
+        if members:
+            placed.append((title, hint, members))
+    text_parts = [greeting, "", intro, ""]
+    for title, hint, members in placed:
+        text_parts += [f"{title.upper()} ({len(members)})", hint, ""]
+        text_parts += [_text_block(l, now, gps_days=gps_days, show_reps=show_reps) + "\n" for l in members]
+    text_parts += [FOOTNOTE, _trailer(repeat_hours)]
+    text = "\n".join(text_parts)
+
+    esc = html_lib.escape
+    headers = ["Load", "Customer", "Lane", "Carrier / driver", "Pickup ETA", "Last GPS ping", "Current location",
+               "Last dispatch comment"] + (["Dispatch / sales rep"] if show_reps else [])
+    th = "".join(f'<th style="text-align:left;padding:4px 8px;border-bottom:2px solid #999">{h}</th>' for h in headers)
+    blocks = []
+    for title, hint, members in placed:
+        blocks.append(f'<h3 style="margin:16px 0 2px">{esc(title)} ({len(members)})</h3>'
+                      f'<p style="margin:0 0 6px;color:#444">{esc(hint)}</p>'
+                      f'<table style="border-collapse:collapse;font-size:13px"><tr>{th}</tr>'
+                      f"{_html_rows(members, now, gps_days=gps_days, show_reps=show_reps)}</table>")
+    html = ('<html><body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222">'
+            f"<p>{esc(greeting)}</p><p>{esc(intro)}</p>" + "".join(blocks)
+            + f'<p style="font-size:12px;color:#666;margin-top:16px">{esc(FOOTNOTE)}<br>{esc(_trailer(repeat_hours))}</p>'
+            "</body></html>")
+    return Email(key=group.key, rep=group.who or None, to=list(group.to), cc=list(group.cc), subject=subject, text=text, html=html,
+                 load_ids=[l.load_id for l in loads], routed=group.routed)
+
+
+# --------------------------------------------------------------------------- #
+# State and transports                                                         #
+# --------------------------------------------------------------------------- #
+
+
+class OutboxTransport(FileTransport):
+    """Dry run: ``outbox/<stamp>_<group>.txt``, one file per email, never overwriting."""
+
+    def send(self, email: Email, from_addr: str) -> str:
+        os.makedirs(self.outbox, exist_ok=True)
+        who = "_".join(re.sub(r"[^A-Za-z0-9]+", "-", part or "nobody").strip("-").lower() for part in email.key.split("|"))
+        base = os.path.join(self.outbox, f"{datetime.now():%Y%m%d-%H%M%S}_{who}")
+        path, n = base + ".txt", 1
+        while os.path.exists(path):
+            n += 1
+            path = f"{base}_{n}.txt"
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(email.dump(from_addr))
+        return f"file:{path}"
+
+
+class AlertState:
+    """``alert_state.json``: ``{"sent": {load_id: {"tracking", "group", "at"}}}``. A load is
+    alerted again after ``repeat_hours``, or at once when its state or owners changed."""
+
+    def __init__(self, path: str | None) -> None:
+        self.path = path
+        self.sent: dict[str, dict[str, str]] = {}
+        if path and os.path.exists(path):
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            self.sent = data.get("sent", {}) if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _signature(load: GpsLoad) -> tuple[str, str]:
+        return load.tracking, "|".join(load.group_key)
+
+    def should_alert(self, load: GpsLoad, now: datetime, repeat_hours: float) -> bool:
+        rec = self.sent.get(load.load_id)
+        if not rec:
+            return True
+        tracking, group = self._signature(load)
+        if rec.get("tracking") != tracking or rec.get("group") != group:
+            return True
+        try:
+            at = datetime.fromisoformat(rec["at"])
+        except (KeyError, ValueError):
+            return True
+        if at.tzinfo is None and now.tzinfo is not None:
+            at = at.replace(tzinfo=now.tzinfo)
+        return now - at >= timedelta(hours=repeat_hours)
+
+    def mark(self, load: GpsLoad, now: datetime) -> None:
+        tracking, group = self._signature(load)
+        self.sent[load.load_id] = {"tracking": tracking, "group": group, "at": now.isoformat(timespec="seconds")}
+
+    def prune(self, now: datetime, keep_days: int = 60) -> None:
+        cutoff = now - timedelta(days=keep_days)
+        for load_id in list(self.sent):
+            try:
+                at = datetime.fromisoformat(self.sent[load_id]["at"])
+                if at.tzinfo is None and now.tzinfo is not None:
+                    at = at.replace(tzinfo=now.tzinfo)
+                if at < cutoff:
+                    del self.sent[load_id]
+            except (KeyError, ValueError, TypeError):
+                del self.sent[load_id]
+
+    def save(self) -> None:
+        if not self.path:
+            return
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump({"updated": datetime.now().isoformat(timespec="seconds"), "sent": self.sent}, handle, indent=2)
+        os.replace(tmp, self.path)
+
+
+# --------------------------------------------------------------------------- #
+# One run                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def grid_params(now: datetime, days_ahead: int = DEFAULT_DAYS_AHEAD) -> dict[str, Any]:
+    """The extra GET parameters: the rep and customer columns, and the date parts of the
+    Pickup ETA filter (the mnemonic must NOT be sent: CargoTel crashes on it; the date
+    parts alone make it drop the filter, which the job then applies locally)."""
+
+    cutoff = eta_cutoff(now, days_ahead)
+    return {
+        "Menu__ViewFields": list(EXTRA_VIEW_FIELDS),
+        "Menu__month_DateStart_PickupETA": str(cutoff.month),
+        "Menu__day_DateStart_PickupETA": str(cutoff.day),
+        "Menu__year_DateStart_PickupETA": str(cutoff.year),
+    }
+
+
+def fetch_grid_html(session: CargoTelSession, now: datetime, *, saved_id: str = SEARCH_ID, days_ahead: int = DEFAULT_DAYS_AHEAD,
+                    save_html: str | None = None) -> tuple[str, Grid]:
+    """The screen with every row, the extra columns and the Pickup ETA filter dropped.
+    Returns the page (needed again for the comment form) and the parsed grid."""
+
+    spec = SearchParams(saved_id, per_page="All", extra=grid_params(now, days_ahead))  # type: ignore[arg-type]
+    status, html, _params = session.fetch_search_html(spec)
+    if save_html:
+        os.makedirs(save_html, exist_ok=True)
+        with open(os.path.join(save_html, f"grid_{datetime.now():%Y%m%d-%H%M}.html"), "w", encoding="utf-8") as handle:
+            handle.write(html)
+    if status != 200:
+        raise RuntimeError(f"CargoTel Search.mcgi returned HTTP {status} for saved search {saved_id}")
+    grid = parse_grid(html, status)
+    if grid.signin_page:
+        raise RuntimeError("CargoTel answered with the sign-in page twice; the S3 session cookie is stale")
+    return html, grid
+
+
+class CommentPoster:
+    """Adds dispatch comments through the grid form and checks them on a re-fetched
+    grid. ``post(page_html, comments)`` -> ``{load_id: landed}``."""
+
+    def __init__(self, session: CargoTelSession, now: datetime, *, saved_id: str = SEARCH_ID,
+                 days_ahead: int = DEFAULT_DAYS_AHEAD) -> None:
+        self.session = session
+        self.now = now
+        self.saved_id = saved_id
+        self.days_ahead = days_ahead
+
+    def post(self, page_html: str, comments: dict[str, str]) -> dict[str, bool]:
+        data = build_comment_post(page_html, comments)
+        url = f"{SEARCH_URL}?expand_saved={self.saved_id}&expand_saved_type=priv&Menu__perPage=All"
+        status, html = session_post(self.session, url, data)
+        if status != 200:
+            raise RuntimeError(f"CargoTel answered HTTP {status} to the comment form")
+        text = _TAG_RE.sub(" ", html)
+        error = re.search(r"An Error was encountered.{0,300}", text, re.S)
+        if error:
+            raise RuntimeError("CargoTel rejected the comment form: " + " ".join(error.group(0).split())[:300])
+        _html, grid = fetch_grid_html(self.session, self.now, saved_id=self.saved_id, days_ahead=self.days_ahead)
+        return verify_comments(grid, comments)
+
+
+def write_comment_dump(outbox: str, comments: dict[str, str], loads: list[GpsLoad]) -> str:
+    """Dry run: the comments that would be added, one line per load, in ``outbox/``."""
+
+    os.makedirs(outbox, exist_ok=True)
+    path = os.path.join(outbox, f"{datetime.now():%Y%m%d-%H%M%S}_comments.txt")
+    by_id = {l.load_id: l for l in loads}
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("Dispatch comments that would be added (load | comment | driver | carrier):\n")
+        for load_id, text in comments.items():
+            load = by_id.get(load_id)
+            driver = nice_name(load.driver) if load and load.driver else "?"
+            handle.write(f"{load_id} | {text} | {driver} | {load.carrier if load else '?'}\n")
+    return path
+
+
+def run_once(
+    page_html: str,
+    grid: Grid,
+    *,
+    now: datetime,
+    reps: dict[str, dict[str, str]],
+    gps_fetch: Callable[[GpsLoad], str] | None,
+    state: AlertState,
+    comment_state: CommentState,
+    transport: Any,
+    poster: Any,
+    from_addr: str,
+    record: bool,
+    post_comments: bool,
+    sent_log: str | None,
+    outbox: str,
+    days_ahead: int = DEFAULT_DAYS_AHEAD,
+    statuses: tuple[str, ...] | list[str] = DEFAULT_STATUSES,
+    exclude_customers: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_CUSTOMERS,
+    stale_hours: float = DEFAULT_STALE_HOURS,
+    gps_days: int = DEFAULT_GPS_DAYS,
+    repeat_hours: float = DEFAULT_REPEAT_HOURS,
+    stellantis_to: list[str] | tuple[str, ...] = DEFAULT_STELLANTIS_TO,
+    escalate: list[str] | tuple[str, ...] = DEFAULT_ESCALATE,
+    default_manager: list[str] | tuple[str, ...] = (),
+    max_gps: int = DEFAULT_MAX_GPS,
+    save_gps: str | None = None,
+    redirect_to: list[str] | None = None,
+    only_rep: str | None = None,
+    only_loads: set[str] | None = None,
+    log: Callable[[str], None] = lambda m: None,
+) -> dict[str, Any]:
+    """Select, check GPS, comment, group, compose, send. ``record=False`` (dry run)
+    leaves the alert state untouched and writes the emails to ``transport`` (the
+    outbox); ``post_comments=False`` writes the planned comments to ``outbox/`` instead
+    of CargoTel. ``redirect_to`` sends every email to those addresses as a marked test
+    copy that is never recorded; ``only_rep`` limits the emails to the groups with that
+    rep ("unassigned" and "stellantis" work too); ``only_loads`` limits the whole run
+    (GPS checks, comments and emails) to those load ids, for tests."""
+
+    loads, warnings, counts = select_loads(grid, now, days_ahead=days_ahead, statuses=statuses, exclude_customers=exclude_customers)
+    for warning in warnings:
+        log(warning)
+    cutoff = eta_cutoff(now, days_ahead)
+    log(f"{SEARCH_NAME}: {counts['rows']} loads, {counts['in_status']} in status {'/'.join(statuses)}, {counts['excluded']} of an excluded "
+        f"customer, {len(loads)} with a pickup ETA before {cutoff:%m/%d/%Y} ({counts['eta_later']} later, {counts['no_eta']} without)")
+    if only_loads is not None:
+        loads = [l for l in loads if l.load_id in only_loads]
+        missing = sorted(only_loads - {l.load_id for l in loads})
+        log(f"limited to {len(loads)} load(s): {', '.join(l.load_id for l in loads) or 'none'}"
+            + (f"; not on the screen: {', '.join(missing)}" if missing else ""))
+    gps_errors = check_gps(loads, gps_fetch, now, stale_hours=stale_hours, max_checks=max_gps, save_html=save_gps, log=log)
+    by_state = {kind: sum(1 for l in loads if l.tracking == kind) for kind in (ACTIVE, STALE, NEVER, UNKNOWN)}
+    log(f"GPS: {by_state[ACTIVE]} active (pinged within {stale_hours:g} h), {by_state[STALE]} stale, {by_state[NEVER]} never pinged "
+        f"in {gps_days} days, {by_state[UNKNOWN]} unreadable")
+
+    summary: dict[str, Any] = {"rows": counts["rows"], "selected": len(loads), "counts": counts, "by_state": by_state,
+                               "warnings": warnings, "gps_errors": gps_errors, "comments": {}, "comments_planned": 0,
+                               "comments_written": 0, "comments_failed": 0, "emails": [], "skipped_repeat": 0}
+
+    # 1. dispatch comments for the loads that are pinging
+    comments = plan_comments(loads, comment_state)
+    summary["comments_planned"] = len(comments)
+    if comments and post_comments and poster is not None:
+        try:
+            landed = poster.post(page_html, comments)
+        except Exception as exc:  # noqa: BLE001 - the emails must still go out
+            log(f"comment form failed: {exc}")
+            summary["comment_error"] = str(exc)
+            landed = {}
+        for load_id, text in comments.items():
+            ok = landed.get(load_id, False)
+            summary["comments"][load_id] = {"text": text, "written": ok}
+            if ok:
+                summary["comments_written"] += 1
+                ping = next((l.last_ping for l in loads if l.load_id == load_id), None)
+                comment_state.mark(load_id, ping.stamp if ping else "", text, now)
+                log(f"comment added on {load_id}: {text}")
+            else:
+                summary["comments_failed"] += 1
+                log(f"comment NOT found on {load_id} after posting: {text}")
+        comment_state.prune(now)
+        comment_state.save()
+    elif comments:
+        path = write_comment_dump(outbox, comments, loads)
+        summary["comments"] = {load_id: {"text": text, "written": False} for load_id, text in comments.items()}
+        log(f"dry run: {len(comments)} comment(s) would be added (written to {path})")
+    else:
+        log("no comments to add")
+
+    # 2. emails for the loads that are not pinging
+    alerts = [l for l in loads if l.tracking in (STALE, NEVER)]
+    if redirect_to:
+        record = False
+    wanted = None
+    if only_rep:
+        wanted = only_rep.strip().lower() if only_rep.strip().lower() in ("unassigned", "stellantis") else _name_key(only_rep)
+    for group in mail_groups(alerts, reps, stellantis_to=stellantis_to, escalate=escalate, default_manager=default_manager):
+        if wanted is not None and not group.matches(wanted):
+            continue
+        fresh = [l for l in group.loads if state.should_alert(l, now, repeat_hours)]
+        summary["skipped_repeat"] += len(group.loads) - len(fresh)
+        label = group.label
+        if not fresh:
+            log(f"{label}: {len(group.loads)} load(s), all alerted within the last {repeat_hours:g} h; nothing sent")
+            continue
+        email = compose(replace(group, loads=fresh), now=now, stale_hours=stale_hours, gps_days=gps_days, repeat_hours=repeat_hours)
+        if redirect_to:
+            email = redirect(email, redirect_to)
+        if not email.to:
+            log(f"{label}: nobody to send to; held")
+            continue
+        try:
+            message_id = transport.send(email, from_addr)
+        except Exception as exc:  # noqa: BLE001 - keep going with the other groups
+            log(f"send failed for {label}: {exc}")
+            summary.setdefault("send_errors", []).append(f"{label}: {exc}")
+            continue
+        verb = "sent" if record else ("test copy sent" if redirect_to else "dry run")
+        log(f"{verb}: {email.subject} -> to {', '.join(email.to)}" + (f" cc {', '.join(email.cc)}" if email.cc else "")
+            + f" [{message_id}]")
+        entry = {"at": now.isoformat(timespec="seconds"), "stellantis": group.stellantis, "dispatch_reps": group.dispatch_reps,
+                 "sales_reps": group.sales_reps, "group": group.key, "to": email.to, "cc": email.cc, "subject": email.subject,
+                 "loads": email.load_ids, "message_id": message_id, "sent": record,
+                 "redirected_to": list(redirect_to) if redirect_to else None}
+        summary["emails"].append(entry)
+        if record:
+            for load in fresh:
+                state.mark(load, now)
+            append_log(sent_log, entry)
+    if record:
+        state.prune(now)
+        state.save()
+    summary["loads"] = [l.to_record(now) for l in loads]
+    return summary
+
+
+# --------------------------------------------------------------------------- #
+# CLI                                                                          #
+# --------------------------------------------------------------------------- #
+
+
+def print_table(loads: list[GpsLoad], now: datetime) -> None:
+    print(f"{'load':<8} {'state':<8} {'customer':<22} {'dispatch rep':<18} {'sales rep':<18} {'pickup ETA':<13} {'last ping':<42} driver")
+    for load in loads:
+        ping = load.last_ping
+        last = _fmt_ping(ping, now) if ping else ("GPS unreadable" if load.gps_error else "-")
+        print(f"{load.load_id:<8} {load.tracking:<8} {(load.customer or '-')[:22]:<22} "
+              f"{(nice_name(load.dispatch_rep) if load.dispatch_rep else '-')[:18]:<18} "
+              f"{(nice_name(load.sales_rep) if load.sales_rep else '-')[:18]:<18} "
+              f"{_fmt_eta(load.pickup_eta, '-'):<13} {last[:42]:<42} {nice_name(load.driver) if load.driver else '-'}")
+
+
+def _addresses(text: str | None) -> list[str]:
+    return [a.strip() for a in (text or "").split(",") if a.strip()]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--saved-id", default=SEARCH_ID, help=f"CargoTel saved search id (default {SEARCH_ID}, {SEARCH_NAME})")
+    parser.add_argument("--days-ahead", type=int, default=DEFAULT_DAYS_AHEAD,
+                        help="pickup ETA before today + this many days, the screen's own date (default 2)")
+    parser.add_argument("--status", default=",".join(DEFAULT_STATUSES), help="comma-separated statuses to check (default Dispatched)")
+    parser.add_argument("--exclude-customer", default=",".join(DEFAULT_EXCLUDE_CUSTOMERS), metavar="ID|NAME[,...]",
+                        help="customers left out of the whole run, by customer id or part of the name (default Merchants Automotive, 81464; "
+                             "\"\" for none)")
+    parser.add_argument("--stale-hours", type=float, default=DEFAULT_STALE_HOURS,
+                        help="a last ping older than this is 'not pinging' (default 4)")
+    parser.add_argument("--gps-days", type=int, default=DEFAULT_GPS_DAYS,
+                        help="GPS history window asked for, in days (default 2, the window the GPS link itself shows)")
+    parser.add_argument("--max-gps", type=int, default=DEFAULT_MAX_GPS, help="GPS pages read per run at most")
+    parser.add_argument("--reps", default=os.path.join(PARENT, "reps.csv"),
+                        help="reps.csv: name,email[,title][,phone][,manager email] (default ../reps.csv)")
+    parser.add_argument("--stellantis-to", default=",".join(DEFAULT_STELLANTIS_TO),
+                        help="comma-separated addresses that get every Stellantis alert with the dispatch rep")
+    parser.add_argument("--escalate-to", default=",".join(DEFAULT_ESCALATE),
+                        help="comma-separated addresses that get an alert when neither rep can be emailed")
+    parser.add_argument("--default-manager", default="", help="comma-separated Cc for sales reps with no manager in reps.csv")
+    parser.add_argument("--from", dest="from_addr", default=os.environ.get("MAIL_FROM", DEFAULT_FROM), help="verified SES sender")
+    parser.add_argument("--send", action="store_true",
+                        help="really send through SES; otherwise emails go to --outbox and the alert state is untouched")
+    parser.add_argument("--post-comments", action="store_true",
+                        help="really add the dispatch comments in CargoTel; otherwise they are written to --outbox")
+    parser.add_argument("--redirect-to", metavar="ADDR[,ADDR]",
+                        help="send every email to these addresses instead, as a marked test copy; nothing is recorded")
+    parser.add_argument("--only-rep", metavar="NAME", help='only the email groups with this rep ("Kaleb Hamman"; "stellantis"; "unassigned")')
+    parser.add_argument("--only-load", metavar="ID[,ID]", help="limit the whole run (GPS checks, comments, emails) to these load ids, for tests")
+    parser.add_argument("--region", help="AWS region for SES (default: boto3's)")
+    parser.add_argument("--configuration-set", help="SES configuration set for bounce/complaint events")
+    parser.add_argument("--outbox", default=os.path.join(HERE, "outbox"), help="dry-run folder")
+    parser.add_argument("--state", default=os.path.join(HERE, "alert_state.json"), help="what was alerted and when")
+    parser.add_argument("--comment-state", default=os.path.join(HERE, "comment_state.json"), help="which ping was written on each load")
+    parser.add_argument("--sent-log", default=os.path.join(HERE, "sent_log.jsonl"), help="one line per email sent")
+    parser.add_argument("--repeat-hours", type=float, default=DEFAULT_REPEAT_HOURS,
+                        help="alert the same load again after this long (default 4; 0 = every run)")
+    parser.add_argument("--save-html", metavar="DIR", help="archive the fetched grid page and GPS pages here")
+    parser.add_argument("--from-html", metavar="FILE", help="parse a saved grid page instead of fetching (offline)")
+    parser.add_argument("--gps-dir", metavar="DIR", help="offline GPS pages, gps_<load>.html (with --from-html)")
+    parser.add_argument("--now", help="pretend it is this time (ISO, with offset), for tests")
+    parser.add_argument("--list", action="store_true", help="print the loads and their GPS state and stop; nothing composed")
+    parser.add_argument("--json", metavar="FILE", help="also write the run summary (or, with --list, the loads) here")
+    args = parser.parse_args(argv)
+
+    now = datetime.fromisoformat(args.now) if args.now else datetime.now().replace(microsecond=0)
+    now = now.astimezone() if now.tzinfo is None else now
+    statuses = tuple(s.strip() for s in args.status.split(",") if s.strip())
+    exclude_customers = tuple(_addresses(args.exclude_customer))
+    redirect_to = _addresses(args.redirect_to) or None
+    only_loads = set(_addresses(args.only_load)) if args.only_load else None
+    record = args.send and not redirect_to
+
+    def log(message: str) -> None:
+        print(f"{datetime.now():%Y-%m-%d %H:%M:%S} tracking-update: {message}", flush=True)
+
+    if args.from_html:
+        with open(args.from_html, encoding="utf-8") as handle:
+            page_html = handle.read()
+        grid = parse_grid(page_html)
+        gps_fetch = dir_fetcher(args.gps_dir) if args.gps_dir else None
+        poster = None
+    else:
+        session = CargoTelSession(min_interval=0.5)
+        page_html, grid = fetch_grid_html(session, now, saved_id=args.saved_id, days_ahead=args.days_ahead, save_html=args.save_html)
+        gps_fetch = gps_fetcher(session, now, args.gps_days)
+        poster = CommentPoster(session, now, saved_id=args.saved_id, days_ahead=args.days_ahead)
+    save_gps = os.path.join(args.save_html, "gps") if args.save_html else None
+
+    if args.list:
+        loads, warnings, counts = select_loads(grid, now, days_ahead=args.days_ahead, statuses=statuses, exclude_customers=exclude_customers)
+        for warning in warnings:
+            log(warning)
+        if only_loads is not None:
+            loads = [l for l in loads if l.load_id in only_loads]
+        errors = check_gps(loads, gps_fetch, now, stale_hours=args.stale_hours, max_checks=args.max_gps, save_html=save_gps, log=log)
+        print_table(loads, now)
+        by_state = {kind: sum(1 for l in loads if l.tracking == kind) for kind in (ACTIVE, STALE, NEVER, UNKNOWN)}
+        comments = plan_comments(loads, CommentState(args.comment_state))
+        log(f"{counts['rows']} loads, {counts['excluded']} of an excluded customer, {len(loads)} with a pickup ETA before "
+            f"{eta_cutoff(now, args.days_ahead):%m/%d/%Y}; "
+            f"{by_state[ACTIVE]} active, {by_state[STALE]} stale, {by_state[NEVER]} never pinged, {by_state[UNKNOWN]} unreadable; "
+            f"{len(comments)} comment(s) would be added; {len(errors)} GPS error(s)")
+        if args.json:
+            with open(args.json, "w", encoding="utf-8") as handle:
+                json.dump({"now": now.isoformat(), "counts": counts, "by_state": by_state, "comments": comments,
+                           "loads": [l.to_record(now) for l in loads]}, handle, indent=2)
+        return 0
+
+    reps = load_rep_details(args.reps)
+    if not reps:
+        log(f"warning: no reps read from {args.reps}; every alert will go to the escalation list")
+    transport = SesTransport(args.region, args.configuration_set) if args.send else OutboxTransport(args.outbox)
+    log(f"{'SENDING via SES' if args.send else 'dry run to ' + args.outbox + '/'} as {args.from_addr}; "
+        f"comments {'POSTED to CargoTel' if args.post_comments else 'to the outbox only'}; stale after {args.stale_hours:g} h; "
+        f"GPS window {args.gps_days} d; repeat after {args.repeat_hours:g} h; Stellantis -> {args.stellantis_to}; "
+        f"escalate -> {args.escalate_to}; excluded customers: {', '.join(exclude_customers) or 'none'}"
+        + (f"; TEST COPIES redirected to {', '.join(redirect_to)}, nothing recorded" if redirect_to else "")
+        + (f"; only {args.only_rep}" if args.only_rep else "")
+        + (f"; only load(s) {', '.join(sorted(only_loads))}" if only_loads else ""))
+    summary = run_once(
+        page_html, grid, now=now, reps=reps, gps_fetch=gps_fetch, state=AlertState(args.state),
+        comment_state=CommentState(args.comment_state), transport=transport, poster=poster, from_addr=args.from_addr,
+        record=record, post_comments=args.post_comments, sent_log=args.sent_log if record else None, outbox=args.outbox,
+        days_ahead=args.days_ahead, statuses=statuses, exclude_customers=exclude_customers, stale_hours=args.stale_hours,
+        gps_days=args.gps_days, repeat_hours=args.repeat_hours, stellantis_to=_addresses(args.stellantis_to),
+        escalate=_addresses(args.escalate_to),
+        default_manager=_addresses(args.default_manager), max_gps=args.max_gps, save_gps=save_gps, redirect_to=redirect_to,
+        only_rep=args.only_rep, only_loads=only_loads, log=log,
+    )
+    log(f"done: {summary['selected']} loads checked, {summary['by_state'][STALE] + summary['by_state'][NEVER]} not pinging, "
+        f"{summary['comments_planned']} comment(s) planned, {summary['comments_written']} written, {summary['comments_failed']} failed, "
+        f"{len(summary['emails'])} email(s), {summary['skipped_repeat']} load(s) already alerted, {len(summary['gps_errors'])} GPS error(s)")
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2, default=str)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
