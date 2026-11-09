@@ -51,7 +51,8 @@ param(
     [string]$EscalateTo = "",
     [string]$DefaultManager = "",
     # The GPS report: the run(s) that send it, by Eastern hour ("10,16" = the 10:00 and 16:00 runs, the user's
-    # choice; "8" once a day; "all" every run; "-" never), who gets it (default: Justice Cromwell) and the quiet
+    # choice; "8" once a day; "all" every run; "-" never), who gets it (default: Justice Cromwell, stellantisob@,
+    # Brett Booth, Podge Ormsby and Mitchell Meyers, the code's list) and the quiet
     # threshold it lists.
     [string]$ReportHours = "10,16",
     [string]$ReportTo = "",
@@ -267,7 +268,7 @@ if ($Send) { $sendState = "ON via SES as $MailFrom" }
 $commentState = "OFF (planned comments go to the outbox)"
 if ($PostComments) { $commentState = "ON (written into CargoTel)" }
 Write-Host ""
-$reportTo = "Justice Cromwell (default)"
+$reportTo = "Justice Cromwell, stellantisob@, Brett Booth, Podge Ormsby, Mitchell Meyers (the code default)"
 if ($ReportTo) { $reportTo = $ReportTo }
 Write-Host "done. sending $sendState; comments $commentState; stale after $StaleHours h; GPS window $GpsDays d; repeat after $RepeatHours h; paused $($Paused.IsPresent)"
 Write-Host "report: run hour(s) $ReportHours ET -> $reportTo; lists drivers quiet > $ReportQuietHours h and loads never pinged; also scans $ReportStatus"

@@ -81,7 +81,8 @@ the report (10:00 and 16:00 ET runs) the In-Route loads (--report-status) are se
                                      the report only; scanned / with issues / without issues per status, per
                                      customer and per dispatch rep; then every load with no GPS pings + every
                                      driver quiet for more than 11 h (--report-quiet-hours) by customer and
-                                     dispatch rep; To Justice Cromwell (--report-to); once per hour slot
+                                     dispatch rep; To Justice, stellantisob@, Brett Booth, Podge Ormsby and
+                                     Mitchell Meyers (--report-to); once per hour slot
 ```
 
 The comment is the ping as CargoTel prints it plus the place, `2026-11-06 06:12:25-05
@@ -180,7 +181,8 @@ Switches worth knowing: `--days-ahead` (2), `--stale-hours` (4), `--gps-days` (2
 `--escalate-to` (default Justice Cromwell and Stuart Mitchell), `--default-manager`,
 `--only-rep NAME` (`stellantis`, `unassigned` work too), `--only-load ID[,ID]` (the whole run
 limited to those loads), `--max-gps` (400), `--save-html DIR`, `--now ISO`, `--json FILE`;
-for the report `--report-to` (Justice Cromwell), `--report-hours` (`10,16`), `--report-quiet-hours`
+for the report `--report-to` (Justice Cromwell, stellantisob@, Brett Booth, Podge Ormsby, Mitchell
+Meyers), `--report-hours` (`10,16`), `--report-quiet-hours`
 (11), `--report-status` (`In-Route`; `""` for none) and `--report` (send it this run).
 
 ## What was verified (2026-11-06)
@@ -291,7 +293,9 @@ and the scanned / with issues / without issues counts; a dry run at 09:18 that m
 158 Dispatched and 62 In-Route loads, 166 with issues after the weekend; the 10:00 run sent the
 first such report (159 + 60 scanned, 152 with issues, 750 s). Code-only redeploy 11:40 ET the same
 day with the tables in Justice's shape (one row per customer / dispatch rep: No Pings, Quiet, OK,
-Total Issues, Total Scanned, Tracking Rate); the 16:00 report is the first in that shape. Bucket
+Total Issues, Total Scanned, Tracking Rate), and again at 13:40 ET with the recipients widened from
+Justice alone to Justice, stellantisob@, Brett Booth, Podge Ormsby and Mitchell Meyers; the 16:00
+report is the first in that shape and to that list. Bucket
 `circle-reload-suggestions`:
 
 | Key | What |

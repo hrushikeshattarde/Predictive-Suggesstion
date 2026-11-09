@@ -733,11 +733,14 @@ class ReportTests(unittest.TestCase):
         scanned, counts = scanned_loads()
         email = compose_report(scanned, now=NOW, to=list(DEFAULT_REPORT_TO), reps=REPS, counts=counts)
         self.assertEqual(email.key, "report")
-        self.assertEqual((email.to, email.cc), (["justice.cromwell@circledelivers.com"], []))
+        self.assertEqual((email.to, email.cc), (list(DEFAULT_REPORT_TO), []))
+        self.assertEqual(DEFAULT_REPORT_TO, ("justice.cromwell@circledelivers.com", "stellantisob@circledelivers.com", "brett.booth@circledelivers.com",
+                                             "pormsby@circledelivers.com", "mitchell.meyers@circledelivers.com"))
         self.assertEqual(email.subject, "GPS tracking report Fri 11/06 09:00: 5 of 11 loads with issues (3 with no GPS pings, 2 quiet for more than 11 h)")
         self.assertEqual(email.load_ids, ["360008", "360002", "354745", "360003", "352243"])
         text = email.text
-        self.assertTrue(text.startswith("Hi Justice,\n"))
+        self.assertTrue(text.startswith("Hi all,\n"))  # five recipients, not all with a name on file
+        self.assertTrue(compose_report(scanned, now=NOW, to=["justice.cromwell@circledelivers.com"], reps=REPS).text.startswith("Hi Justice,\n"))
         self.assertIn("shows 9 Dispatched and 2 In-Route loads with a pickup ETA before 11/08/2026.", text)
         self.assertIn("SCANNED\n", text)
         self.assertIn("  status      no pings  quiet > 11 h  OK  total issues  total scanned  unreadable  tracking rate\n", text)
@@ -936,7 +939,7 @@ class RunTests(unittest.TestCase):
         summary, transport, _p = self.run_once(record=True, now=ten)
         reports = [e for e, _f in transport.sent if e.key == "report"]
         self.assertEqual(len(reports), 1)
-        self.assertEqual(reports[0].to, ["justice.cromwell@circledelivers.com"])
+        self.assertEqual(reports[0].to, list(DEFAULT_REPORT_TO))
         self.assertEqual((summary["report"]["never"], summary["report"]["quiet"]), (["360008", "360002", "354745"], ["360003", "352243"]))
         self.assertEqual(summary["report"]["scanned"]["In-Route"], {"scanned": 2, "never": 1, "quiet": 0, "ok": 1, "unknown": 0})
         self.assertEqual([l["load_id"] for l in summary["report_loads"]], ["360008", "360011"])
@@ -1093,7 +1096,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(main(self.common() + ["--report", "--json", out]), 0)
         with open(out, encoding="utf-8") as handle:
             data = json.load(handle)
-        self.assertEqual(data["report"]["to"], ["justice.cromwell@circledelivers.com"])
+        self.assertEqual(data["report"]["to"], list(DEFAULT_REPORT_TO))
         self.assertEqual(data["report"]["never"], ["360008", "360002", "354745"])
         self.assertEqual(data["report"]["scanned"]["All"]["scanned"], 11)
         self.assertFalse(data["report"]["sent"])

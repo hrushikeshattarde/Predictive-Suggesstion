@@ -150,7 +150,15 @@ DEFAULT_EXCLUDE_CUSTOMERS = ("81464", "Merchants Automotive")
 #: with no GPS pings and every driver quiet for longer than DEFAULT_REPORT_QUIET_HOURS,
 #: by customer and dispatch rep. Sent by the run(s) whose Eastern hour is listed in
 #: DEFAULT_REPORT_HOURS ("all" = every run), once per hour slot. 10:00 and 16:00 ET: the user's choice.
-DEFAULT_REPORT_TO = ("justice.cromwell@circledelivers.com",)
+#: Justice Cromwell, the Stellantis mailbox, Brett Booth, Podge Ormsby and Mitchell Meyers
+#: (the user's list, 2026-11-09 13:35 ET; Justice alone before that).
+DEFAULT_REPORT_TO = (
+    "justice.cromwell@circledelivers.com",
+    "stellantisob@circledelivers.com",
+    "brett.booth@circledelivers.com",
+    "pormsby@circledelivers.com",
+    "mitchell.meyers@circledelivers.com",
+)
 DEFAULT_REPORT_HOURS: tuple[int, ...] | str = (10, 16)
 DEFAULT_REPORT_QUIET_HOURS = 11.0
 #: Statuses scanned for the report only (no comments, no alerts): the In-Route loads on
@@ -1891,7 +1899,8 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
                         help="comma-separated addresses that get an alert when neither rep can be emailed")
     parser.add_argument("--default-manager", default="", help="comma-separated Cc for sales reps with no manager in reps.csv")
     parser.add_argument("--report-to", default=",".join(DEFAULT_REPORT_TO), metavar="ADDR[,ADDR]",
-                        help="who gets the daily GPS report (default Justice Cromwell; \"\" for nobody)")
+                        help="who gets the GPS report (default Justice Cromwell, the Stellantis mailbox, Brett Booth, Podge Ormsby and Mitchell Meyers; "
+                             "\"\" for nobody)")
     parser.add_argument("--report-hours", default="all" if DEFAULT_REPORT_HOURS == "all" else ",".join(str(h) for h in DEFAULT_REPORT_HOURS),
                         metavar="H[,H]|all|never", help="the run(s) that send the report, by hour of day (default 10,16: the 10:00 and 16:00 ET runs)")
     parser.add_argument("--report-quiet-hours", type=float, default=DEFAULT_REPORT_QUIET_HOURS,
