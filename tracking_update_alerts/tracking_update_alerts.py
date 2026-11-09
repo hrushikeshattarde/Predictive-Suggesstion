@@ -1289,7 +1289,6 @@ def _report_text_section(title: str, members: list[GpsLoad], now: datetime, hint
 
 _TD = '<td style="padding:4px 8px;border-bottom:1px solid #ddd;vertical-align:top">'
 _TH = '<th style="text-align:left;padding:4px 8px;border-bottom:2px solid #999">'
-_TH_GROUP = '<th style="text-align:center;padding:4px 8px;border-bottom:1px solid #bbb">'
 _TD_NUM = '<td style="padding:4px 8px;border-bottom:1px solid #ddd;text-align:right">'
 
 
@@ -1333,74 +1332,55 @@ def _issue_num(n: int) -> str:
     return _TD_NUM + (f'<b style="color:#b00020">{n}</b>' if n else "0") + "</td>"
 
 
-def _status_table_html(by_status: list[tuple[str, dict[str, int]]], hours: str, show_unknown: bool) -> str:
+def _rate(tally: dict[str, int]) -> str:
+    """The tracking rate: the share of the scanned loads that pinged within the quiet window."""
+
+    return f"{100.0 * tally[OK] / tally['scanned']:.2f}%" if tally["scanned"] else "n/a"
+
+
+def _sum_tallies(tallies: list[dict[str, int]]) -> dict[str, int]:
+    total = _tally()
+    for t in tallies:
+        for k in TALLY_KEYS:
+            total[k] += t[k]
+    return total
+
+
+def _tally_cells(t: dict[str, int], show_unknown: bool) -> list[Any]:
+    return [t[NEVER], t[QUIET], t[OK], _issues(t), t["scanned"]] + ([t[UNKNOWN]] if show_unknown else []) + [_rate(t)]
+
+
+def _tally_columns(hours: str, show_unknown: bool) -> list[str]:
+    return ["No Pings", f"Quiet > {hours} h", "OK", "Total Issues", "Total Scanned"] + (["Unreadable"] if show_unknown else []) + ["Tracking Rate"]
+
+
+def _tally_row_html(label: str, t: dict[str, int], show_unknown: bool, strong: bool = False) -> str:
     esc = html_lib.escape
-    headers = ["Status", "Scanned", "With issues", "No GPS pings", f"Quiet > {hours} h", "Without issues"] + (["Unreadable"] if show_unknown else [])
-    th = "".join(_TH + esc(h) + "</th>" for h in headers)
-    body = ""
-    for label, t in by_status:
-        strong = label == "All"
-        cells = [_TD + (f"<b>{esc(label)}</b>" if strong else esc(label)) + "</td>", _num(t["scanned"], strong), _issue_num(_issues(t)),
-                 _num(t[NEVER], strong), _num(t[QUIET], strong), _num(t[OK], strong)] + ([_num(t[UNKNOWN], strong)] if show_unknown else [])
-        body += "<tr>" + "".join(cells) + "</tr>"
+    cells = [_TD + (f"<b>{esc(label)}</b>" if strong else esc(label)) + "</td>", _issue_num(t[NEVER]), _issue_num(t[QUIET]),
+             _num(t[OK], strong), _issue_num(_issues(t)), _num(t["scanned"], strong)]
+    if show_unknown:
+        cells.append(_num(t[UNKNOWN], strong))
+    cells.append(_TD_NUM + f'<b style="color:#1a7f37">{_rate(t)}</b></td>')
+    return "<tr>" + "".join(cells) + "</tr>"
+
+
+def _tally_table_html(first: str, rows: list[tuple[str, dict[str, int]]], hours: str, show_unknown: bool, *, total: bool) -> str:
+    """One row per label, the issue counts in red, the tracking rate in green, a Total row."""
+
+    esc = html_lib.escape
+    th = "".join(_TH + esc(h) + "</th>" for h in [first] + _tally_columns(hours, show_unknown))
+    body = "".join(_tally_row_html(label, t, show_unknown, strong=(label == "All")) for label, t in rows)
+    if total:
+        body += _tally_row_html("Total", _sum_tallies([t for _l, t in rows]), show_unknown, True)
     return f'<table style="border-collapse:collapse;font-size:13px"><tr>{th}</tr>{body}</table>'
 
 
-def _breakdown_html(title: str, first: str, rows: list[tuple[str, dict[str, dict[str, int]], dict[str, int]]],
-                    statuses: list[str], hours: str, show_unknown: bool) -> str:
-    esc = html_lib.escape
-    if not rows:
-        return ""
-    all_cols = ["scanned", "no GPS pings", f"quiet > {hours} h", "OK"] + (["unreadable"] if show_unknown else [])
-    head1 = (f'<tr><th rowspan="2" style="text-align:left;padding:4px 8px;border-bottom:2px solid #999;vertical-align:bottom">{esc(first)}</th>'
-             + "".join(f'{_TH_GROUP[:-1]} colspan="3">{esc(s)}</th>' for s in statuses)
-             + f'{_TH_GROUP[:-1]} colspan="{len(all_cols)}">All</th></tr>')
-    head2 = ("<tr>" + "".join(_TH + c + "</th>" for _s in statuses for c in ("scanned", "issues", "OK"))
-             + "".join(_TH + esc(c) + "</th>" for c in all_cols) + "</tr>")
-
-    def cells_for(per_status: dict[str, dict[str, int]], total: dict[str, int], strong: bool) -> str:
-        out = ""
-        for s in statuses:
-            t = per_status[s]
-            out += _num(t["scanned"], strong) + _issue_num(_issues(t)) + _num(t[OK], strong)
-        out += _num(total["scanned"], strong) + _issue_num(total[NEVER]) + _issue_num(total[QUIET]) + _num(total[OK], strong)
-        if show_unknown:
-            out += _num(total[UNKNOWN], strong)
-        return out
-
-    body = "".join(f"<tr>{_TD}{esc(label)}</td>{cells_for(per_status, total, False)}</tr>" for label, per_status, total in rows)
-    sum_status = {s: _tally() for s in statuses}
-    sum_all = _tally()
-    for _label, per_status, total in rows:
-        for s in statuses:
-            for k in TALLY_KEYS:
-                sum_status[s][k] += per_status[s][k]
-        for k in TALLY_KEYS:
-            sum_all[k] += total[k]
-    body += f"<tr>{_TD}<b>Total</b></td>{cells_for(sum_status, sum_all, True)}</tr>"
-    return (f'<h3 style="margin:16px 0 4px">{esc(title)}</h3>'
-            f'<table style="border-collapse:collapse;font-size:13px">{head1}{head2}{body}</table>')
-
-
-def _breakdown_text(first: str, rows: list[tuple[str, dict[str, dict[str, int]], dict[str, int]]], statuses: list[str], hours: str,
-                    show_unknown: bool) -> list[str]:
-    headers = [first]
-    groups: list[tuple[str, int, int]] = []
-    for s in statuses:
-        groups.append((s, len(headers), 3))
-        headers += ["scanned", "issues", "OK"]
-    all_cols = ["scanned", "no pings", f"quiet>{hours}h", "OK"] + (["unreadable"] if show_unknown else [])
-    groups.append(("All", len(headers), len(all_cols)))
-    headers += all_cols
-    table: list[list[Any]] = []
-    for label, per_status, total in rows:
-        cells: list[Any] = [label]
-        for s in statuses:
-            t = per_status[s]
-            cells += [t["scanned"], _issues(t), t[OK]]
-        cells += [total["scanned"], total[NEVER], total[QUIET], total[OK]] + ([total[UNKNOWN]] if show_unknown else [])
-        table.append(cells)
-    return _text_table(headers, table, groups)
+def _tally_table_text(first: str, rows: list[tuple[str, dict[str, int]]], hours: str, show_unknown: bool, *, total: bool) -> list[str]:
+    headers = [first] + [c.lower() if c != "OK" else c for c in _tally_columns(hours, show_unknown)]
+    table: list[list[Any]] = [[label] + _tally_cells(t, show_unknown) for label, t in rows]
+    if total:
+        table.append(["Total"] + _tally_cells(_sum_tallies([t for _l, t in rows]), show_unknown))
+    return _text_table(headers, table)
 
 
 def compose_report(
@@ -1428,7 +1408,6 @@ def compose_report(
     unknown = [l for l in loads if l.tracking == UNKNOWN]
     hours = f"{quiet_hours:g}"
     breakdown = report_breakdowns(loads, now, quiet_hours, tuple(statuses) + tuple(report_statuses))
-    status_labels: list[str] = breakdown["statuses"]
     total = breakdown["status"][-1][1]
     show_unknown = total[UNKNOWN] > 0
     cutoff = eta_cutoff(now, days_ahead)
@@ -1450,7 +1429,8 @@ def compose_report(
     scanned_desc = " and ".join(f"{t['scanned']} {label}" for label, t in breakdown["status"][:-1]) + " loads"
     intro = (f"GPS tracking report as of {_fmt_when(now)}: {SEARCH_NAME} ({SEARCH_PATH}) shows {scanned_desc} with a pickup ETA "
              f"before {cutoff:%m/%d/%Y}{excluded}. Each load's GPS history (its \"GPS City/St Link\") was checked over the last "
-             f"{gps_days} days; a load has an issue when it has no ping at all or its last ping is older than {hours} hours.")
+             f"{gps_days} days; a load has an issue when it has no ping at all or its last ping is older than {hours} hours. The "
+             f"tracking rate is the share of the scanned loads without an issue.")
     sections = [
         ("No GPS pings", never, f"No position from the tracking app in the last {gps_days} days.", False),
         (f"Quiet for more than {hours} h", quiet, f"The driver was pinging, but the last position is older than {hours} hours.", True),
@@ -1459,13 +1439,12 @@ def compose_report(
                f"or never pinging, repeated every 4 h); the {'/'.join(report_statuses) or 'other'} loads are scanned for this report only "
                f"and get no comments or alerts. Generated from {SEARCH_NAME}; reply to this email if a load is mis-assigned.")
 
-    status_headers = ["status", "scanned", "with issues", "no GPS pings", f"quiet > {hours} h", "without issues"] + (["unreadable"] if show_unknown else [])
-    status_rows = [[label, t["scanned"], _issues(t), t[NEVER], t[QUIET], t[OK]] + ([t[UNKNOWN]] if show_unknown else [])
-                   for label, t in breakdown["status"]]
+    by_customer = [(label, total) for label, _per, total in breakdown["customer"]]
+    by_rep = [(label, total) for label, _per, total in breakdown["dispatch_rep"]]
     text_parts = [greeting, "", intro, ""]
-    text_parts += ["SCANNED"] + _text_table(status_headers, status_rows) + [""]
-    text_parts += ["BY CUSTOMER"] + _breakdown_text("customer", breakdown["customer"], status_labels, hours, show_unknown) + [""]
-    text_parts += ["BY DISPATCH REP"] + _breakdown_text("dispatch rep", breakdown["dispatch_rep"], status_labels, hours, show_unknown) + [""]
+    text_parts += ["SCANNED"] + _tally_table_text("status", breakdown["status"], hours, show_unknown, total=False) + [""]
+    text_parts += ["BY CUSTOMER"] + _tally_table_text("customer", by_customer, hours, show_unknown, total=True) + [""]
+    text_parts += ["BY DISPATCH REP"] + _tally_table_text("dispatch rep", by_rep, hours, show_unknown, total=True) + [""]
     for title, members, hint, _with_ping in sections:
         text_parts += _report_text_section(title, members, now, hint)
     if unknown:
@@ -1474,9 +1453,9 @@ def compose_report(
     text = "\n".join(text_parts)
 
     esc = html_lib.escape
-    blocks = [_status_table_html(breakdown["status"], hours, show_unknown),
-              _breakdown_html("By customer", "Customer", breakdown["customer"], status_labels, hours, show_unknown),
-              _breakdown_html("By dispatch rep", "Dispatch rep", breakdown["dispatch_rep"], status_labels, hours, show_unknown)]
+    blocks = [_tally_table_html("Status", breakdown["status"], hours, show_unknown, total=False),
+              f'<h3 style="margin:16px 0 4px">By customer</h3>' + _tally_table_html("Customer", by_customer, hours, show_unknown, total=True),
+              f'<h3 style="margin:16px 0 4px">By dispatch rep</h3>' + _tally_table_html("Dispatch rep", by_rep, hours, show_unknown, total=True)]
     for title, members, hint, with_ping in sections:
         blocks.append(f'<h3 style="margin:20px 0 2px">{esc(title)} ({len(members)})</h3><p style="margin:0 0 6px;color:#444">{esc(hint)}</p>'
                       + (_report_html_table(members, now, with_ping=with_ping) if members else "<p>none</p>"))

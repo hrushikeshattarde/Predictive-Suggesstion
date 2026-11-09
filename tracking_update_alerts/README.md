@@ -120,12 +120,14 @@ alerts, and outside report hours they are not even looked at (the screen had 193
 Dispatched and 65 In-Route rows that morning).
 
 The email: a greeting, one line with the screen's numbers (loads per status, the pickup
-ETA cutoff, how many Merchants loads were left out, the 2-day GPS window), then
-**Scanned**: one row per status (Dispatched, In-Route) and a total, with scanned / with
-issues / no GPS pings / quiet more than 11 h / without issues (and unreadable, when any).
-Then **By customer** and **By dispatch rep**: per status the loads scanned, with issues
-and OK, then overall scanned, no pings, quiet and OK, the most issues first, with a total
-row. Then the loads: **No GPS pings** and **Quiet for more than 11 h**, each grouped by
+ETA cutoff, how many Merchants loads were left out, the 2-day GPS window), then three
+tables in the shape Justice asked for on 2026-11-09 (11:32): **Scanned** (one row per
+status, Dispatched and In-Route, and an All row), **By customer** and **By dispatch rep**
+(one row each, the most issues first, and a Total row), every one with the columns No
+Pings | Quiet > 11 h | OK | Total Issues | Total Scanned | Tracking Rate (the share of
+the scanned loads without an issue, as a percentage; issue counts in red, the rate in
+green; an Unreadable column appears only when a GPS page could not be read). Then the
+loads: **No GPS pings** and **Quiet for more than 11 h**, each grouped by
 customer, then by dispatch rep (plain text) or as one table sorted that way (HTML:
 customer, dispatch rep, load with links to the load and its GPS history, status, lane,
 carrier and driver with the driver's cell, pickup ETA, last GPS ping for the quiet ones,
@@ -286,7 +288,10 @@ moved ahead of the comment phase, with the state checkpointed to S3 in between. 
 slot since went out (Fri 16:00, Sat and Sun 10:00 and 16:00); runs took 8 to 11.5 minutes, no
 timeouts. Redeployed 2026-11-09 09:25 ET with the In-Route scan (`TRACK_REPORT_STATUS=In-Route`)
 and the scanned / with issues / without issues counts; a dry run at 09:18 that morning scanned
-158 Dispatched and 62 In-Route loads, 166 with issues after the weekend. Bucket
+158 Dispatched and 62 In-Route loads, 166 with issues after the weekend; the 10:00 run sent the
+first such report (159 + 60 scanned, 152 with issues, 750 s). Code-only redeploy 11:40 ET the same
+day with the tables in Justice's shape (one row per customer / dispatch rep: No Pings, Quiet, OK,
+Total Issues, Total Scanned, Tracking Rate); the 16:00 report is the first in that shape. Bucket
 `circle-reload-suggestions`:
 
 | Key | What |
