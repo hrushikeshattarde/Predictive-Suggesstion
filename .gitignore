@@ -55,3 +55,11 @@ tracking_update_alerts/outbox/
 tracking_update_alerts/pages/
 tracking_update_alerts/build/
 tracking_update_alerts/dist/
+
+# sales_rep_sync: local run output (reports and the change log name customers and loads)
+sales_rep_sync/changes.jsonl
+sales_rep_sync/outbox/
+sales_rep_sync/reports/
+sales_rep_sync/pages/
+sales_rep_sync/build/
+sales_rep_sync/dist/
