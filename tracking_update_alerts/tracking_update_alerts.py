@@ -54,6 +54,9 @@ Within a run the emails and the report go out first and the alert state is saved
 on AWS, checkpointed to S3); the comment form is posted last, because CargoTel takes
 minutes to re-render the screen for it and a timeout there must cost the comments only.
 
+``--no-alerts`` (``TRACK_ALERTS=0``) switches the hourly emails to the reps off while the
+comments and the report carry on (the user's choice from 2026-11-09 14:35 ET).
+
 Usage::
 
     python tracking_update_alerts.py --list                    # the loads and their GPS state, nothing done
@@ -1405,6 +1408,7 @@ def compose_report(
     report_statuses: tuple[str, ...] | list[str] = DEFAULT_REPORT_STATUSES,
     exclude_customers: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_CUSTOMERS,
     counts: dict[str, int] | None = None,
+    alerts_on: bool = True,
 ) -> Email:
     """The report for the operations manager: the whole screen at a glance. ``loads`` are
     the alert loads (``statuses``) plus the report-only ones (``report_statuses``, In-Route),
@@ -1444,9 +1448,15 @@ def compose_report(
         ("No GPS pings", never, f"No position from the tracking app in the last {gps_days} days.", False),
         (f"Quiet for more than {hours} h", quiet, f"The driver was pinging, but the last position is older than {hours} hours.", True),
     ]
-    trailer = (f"The reps get the hourly GPS alerts for the {'/'.join(statuses)} loads separately (a driver quiet for more than 4 h, "
-               f"or never pinging, repeated every 4 h); the {'/'.join(report_statuses) or 'other'} loads are scanned for this report only "
-               f"and get no comments or alerts. Generated from {SEARCH_NAME}; reply to this email if a load is mis-assigned.")
+    if alerts_on:
+        trailer = (f"The reps get the hourly GPS alerts for the {'/'.join(statuses)} loads separately (a driver quiet for more than 4 h, "
+                   f"or never pinging, repeated every 4 h); the {'/'.join(report_statuses) or 'other'} loads are scanned for this report only "
+                   f"and get no comments or alerts. Generated from {SEARCH_NAME}; reply to this email if a load is mis-assigned.")
+    else:
+        trailer = (f"The hourly GPS alerts to the reps are switched off, so this report is the only email about these loads. The "
+                   f"{'/'.join(statuses)} loads still get their last ping written as a dispatch comment every hour; the "
+                   f"{'/'.join(report_statuses) or 'other'} loads are scanned for this report only. Generated from {SEARCH_NAME}; reply to "
+                   "this email if a load is mis-assigned.")
 
     by_customer = [(label, total) for label, _per, total in breakdown["customer"]]
     by_rep = [(label, total) for label, _per, total in breakdown["dispatch_rep"]]
@@ -1679,6 +1689,7 @@ def run_once(
     report_quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
     report_statuses: tuple[str, ...] | list[str] = DEFAULT_REPORT_STATUSES,
     force_report: bool = False,
+    send_alerts: bool = True,
     max_gps: int = DEFAULT_MAX_GPS,
     save_gps: str | None = None,
     redirect_to: list[str] | None = None,
@@ -1698,7 +1709,8 @@ def run_once(
     per hour slot; ``only_rep`` runs skip it unless forced. When it is due, the loads in
     ``report_statuses`` (In-Route) are selected and GPS-checked too, for the report alone.
     ``checkpoint`` is called once the emails are out and the alert state is saved, before
-    the comment phase."""
+    the comment phase. ``send_alerts=False`` skips the emails to the reps altogether (comments
+    and report unaffected)."""
 
     loads, warnings, counts = select_loads(grid, now, days_ahead=days_ahead, statuses=statuses, exclude_customers=exclude_customers)
     for warning in warnings:
@@ -1733,7 +1745,7 @@ def run_once(
             f"{len(extra)} with a pickup ETA before {cutoff:%m/%d/%Y}; GPS: {extra_state[ACTIVE]} active, {extra_state[STALE]} stale, "
             f"{extra_state[NEVER]} never pinged, {extra_state[UNKNOWN]} unreadable")
 
-    summary: dict[str, Any] = {"rows": counts["rows"], "selected": len(loads), "counts": counts, "by_state": by_state,
+    summary: dict[str, Any] = {"alerts_on": send_alerts, "rows": counts["rows"], "selected": len(loads), "counts": counts, "by_state": by_state,
                                "warnings": warnings, "gps_errors": gps_errors, "comments": {}, "comments_planned": 0,
                                "comments_written": 0, "comments_failed": 0, "emails": [], "skipped_repeat": 0}
 
@@ -1744,7 +1756,10 @@ def run_once(
     wanted = None
     if only_rep:
         wanted = only_rep.strip().lower() if only_rep.strip().lower() in ("unassigned", "stellantis") else _name_key(only_rep)
-    for group in mail_groups(alerts, reps, stellantis_to=stellantis_to, escalate=escalate, default_manager=default_manager):
+    if not send_alerts:
+        log(f"alerts off (--no-alerts): {len(alerts)} load(s) not pinging, no emails to the reps")
+    groups = mail_groups(alerts, reps, stellantis_to=stellantis_to, escalate=escalate, default_manager=default_manager) if send_alerts else []
+    for group in groups:
         if wanted is not None and not group.matches(wanted):
             continue
         fresh = [l for l in group.loads if state.should_alert(l, now, repeat_hours)]
@@ -1791,7 +1806,7 @@ def run_once(
         tallies = report_breakdowns(scanned, now, report_quiet_hours, tuple(statuses) + tuple(report_statuses))["status"]
         email = compose_report(scanned, now=now, to=list(report_to), reps=reps, quiet_hours=report_quiet_hours, gps_days=gps_days,
                                days_ahead=days_ahead, statuses=statuses, report_statuses=report_statuses, exclude_customers=exclude_customers,
-                               counts={"excluded": counts["excluded"] + extra_counts["excluded"]})
+                               counts={"excluded": counts["excluded"] + extra_counts["excluded"]}, alerts_on=send_alerts)
         if redirect_to:
             email = redirect(email, redirect_to)
         try:
@@ -1909,6 +1924,8 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
     parser.add_argument("--report-status", default=",".join(DEFAULT_REPORT_STATUSES), metavar="STATUS[,...]",
                         help="statuses scanned for the report only, no comments or alerts (default In-Route; \"\" for none)")
     parser.add_argument("--report", action="store_true", help="send the report this run whatever the hour (with --redirect-to for a look first)")
+    parser.add_argument("--no-alerts", action="store_true",
+                        help="no emails to the reps about loads not pinging; the dispatch comments and the report carry on")
     parser.add_argument("--from", dest="from_addr", default=os.environ.get("MAIL_FROM", DEFAULT_FROM), help="verified SES sender")
     parser.add_argument("--send", action="store_true",
                         help="really send through SES; otherwise emails go to --outbox and the alert state is untouched")
@@ -1996,6 +2013,7 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
         f"escalate -> {args.escalate_to}; excluded customers: {', '.join(exclude_customers) or 'none'}"
         f"; report {report_when} -> {', '.join(report_to) or 'nobody'}" + (" (forced this run)" if args.report else "")
         + (f", also scanning {', '.join(report_statuses)}" if report_statuses else "")
+        + ("; ALERTS TO THE REPS OFF (--no-alerts)" if args.no_alerts else "")
         + (f"; TEST COPIES redirected to {', '.join(redirect_to)}, nothing recorded" if redirect_to else "")
         + (f"; only {args.only_rep}" if args.only_rep else "")
         + (f"; only load(s) {', '.join(sorted(only_loads))}" if only_loads else ""))
@@ -2007,7 +2025,8 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
         gps_days=args.gps_days, repeat_hours=args.repeat_hours, stellantis_to=_addresses(args.stellantis_to),
         escalate=_addresses(args.escalate_to),
         default_manager=_addresses(args.default_manager), report_to=report_to, report_hours=report_hours,
-        report_quiet_hours=args.report_quiet_hours, report_statuses=report_statuses, force_report=args.report, max_gps=args.max_gps,
+        report_quiet_hours=args.report_quiet_hours, report_statuses=report_statuses, force_report=args.report,
+        send_alerts=not args.no_alerts, max_gps=args.max_gps,
         save_gps=save_gps,
         redirect_to=redirect_to, only_rep=args.only_rep, only_loads=only_loads, checkpoint=checkpoint, log=log,
     )

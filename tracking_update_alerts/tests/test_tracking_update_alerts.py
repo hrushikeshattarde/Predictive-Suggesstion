@@ -881,6 +881,23 @@ class RunTests(unittest.TestCase):
                                             checkpoint=lambda: (_ for _ in ()).throw(RuntimeError("s3 down")))
         self.assertEqual(len(poster.calls), 1)
 
+    def test_no_alerts_keeps_the_comments_and_the_report(self):
+        summary, transport, poster = self.run_once(record=True, post_comments=True, now=NOW.replace(hour=11), send_alerts=False)
+        self.assertFalse(summary["alerts_on"])
+        self.assertEqual(summary["emails"], [])
+        self.assertEqual(self.state.sent, {})  # nothing alerted, so nothing to repeat later
+        self.assertEqual(poster.calls, [STALE_AND_ACTIVE_COMMENTS])
+        self.assertEqual(summary["comments_written"], 5)
+        reports = [e for e, _f in transport.sent if e.key == "report"]
+        self.assertEqual(len(transport.sent), 1)
+        self.assertEqual(reports[0].to, list(DEFAULT_REPORT_TO))
+        self.assertIn("The hourly GPS alerts to the reps are switched off", reports[0].text)
+        self.assertNotIn("The reps get the hourly GPS alerts", reports[0].text)
+        self.assertEqual(self.state.report["slot"], "2026-11-06 11")
+        # alerts back on: the loads are alerted as if for the first time
+        summary, transport, _p = self.run_once(record=True, now=NOW.replace(hour=12))
+        self.assertEqual(len(summary["emails"]), 6)
+
     def test_comment_failures_are_counted_and_do_not_stop_the_emails(self):
         summary, transport, _p = self.run_once(record=True, post_comments=True, poster=FakePoster(fail=["352242"]))
         self.assertEqual((summary["comments_written"], summary["comments_failed"]), (4, 1))
@@ -1089,6 +1106,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args[args.index("--report-status") + 1], "")
         args = tracking_update_lambda.alert_args("/w", {"TRACK_REPORT_STATUS": "In-Route,Delivered"})
         self.assertEqual(args[args.index("--report-status") + 1], "In-Route,Delivered")
+        self.assertNotIn("--no-alerts", args)
+        self.assertNotIn("--no-alerts", tracking_update_lambda.alert_args("/w", {"TRACK_ALERTS": "1"}))
+        self.assertIn("--no-alerts", tracking_update_lambda.alert_args("/w", {"TRACK_ALERTS": "0"}))
         self.assertNotIn("--report", args)
 
     def test_report_from_the_command_line(self):
@@ -1126,6 +1146,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(data["report"]["quiet"], ["360001", "360003", "360010", "352243"])
         with self.assertRaises(SystemExit):
             main(self.common() + ["--report-hours", "noon"])
+        # --no-alerts: the comments are still planned, no alert emails, the forced report still goes
+        self.assertEqual(main(self.common() + ["--no-alerts", "--report", "--json", out]), 0)
+        with open(out, encoding="utf-8") as handle:
+            data = json.load(handle)
+        self.assertFalse(data["alerts_on"])
+        self.assertEqual(data["emails"], [])
+        self.assertEqual(data["comments_planned"], 5)
+        self.assertIsNotNone(data["report"])
 
 
 if __name__ == "__main__":

@@ -20,6 +20,10 @@
     .\tracking_update_alerts\deploy.ps1 -Send -PostComments
 
 .EXAMPLE
+    # live, but no hourly emails to the reps: comments + the report only (the state since 2026-11-09)
+    .\tracking_update_alerts\deploy.ps1 -Send -PostComments -NoAlerts
+
+.EXAMPLE
     # a code change only
     .\tracking_update_alerts\deploy.ps1 -CodeOnly
 
@@ -67,6 +71,8 @@ param(
     [int]$TimeoutSeconds = 900,
     [switch]$Send,
     [switch]$PostComments,
+    # No hourly emails to the reps; the comments and the report carry on (the user's choice, 2026-11-09).
+    [switch]$NoAlerts,
     [switch]$SavePages,
     [switch]$Paused,
     [switch]$CodeOnly
@@ -201,6 +207,7 @@ $vars["TRACK_SEND"] = "0";          if ($Send) { $vars["TRACK_SEND"] = "1" }
 $vars["TRACK_POST_COMMENTS"] = "0"; if ($PostComments) { $vars["TRACK_POST_COMMENTS"] = "1" }
 $vars["TRACK_SAVE_PAGES"] = "0";    if ($SavePages) { $vars["TRACK_SAVE_PAGES"] = "1" }
 $vars["TRACK_PAUSED"] = "0";        if ($Paused) { $vars["TRACK_PAUSED"] = "1" }
+$vars["TRACK_ALERTS"] = "1";        if ($NoAlerts) { $vars["TRACK_ALERTS"] = "0" }
 $vars["TRACK_DAYS_AHEAD"] = [string]$DaysAhead
 $vars["TRACK_STALE_HOURS"] = [string]$StaleHours
 $vars["TRACK_GPS_DAYS"] = [string]$GpsDays
@@ -270,7 +277,9 @@ if ($PostComments) { $commentState = "ON (written into CargoTel)" }
 Write-Host ""
 $reportTo = "Justice Cromwell, stellantisob@, Brett Booth, Podge Ormsby, Mitchell Meyers (the code default)"
 if ($ReportTo) { $reportTo = $ReportTo }
-Write-Host "done. sending $sendState; comments $commentState; stale after $StaleHours h; GPS window $GpsDays d; repeat after $RepeatHours h; paused $($Paused.IsPresent)"
+$alertState = "ON (hourly emails to the reps)"
+if ($NoAlerts) { $alertState = "OFF (no emails to the reps; comments and report only)" }
+Write-Host "done. sending $sendState; alerts $alertState; comments $commentState; stale after $StaleHours h; GPS window $GpsDays d; repeat after $RepeatHours h; paused $($Paused.IsPresent)"
 Write-Host "report: run hour(s) $ReportHours ET -> $reportTo; lists drivers quiet > $ReportQuietHours h and loads never pinged; also scans $ReportStatus"
 Write-Host "run one pass now:"
 Write-Host "  aws lambda invoke --function-name $FunctionName --invocation-type Event --profile $AwsProfile --region $Region --payload '{}' --cli-binary-format raw-in-base64-out out.json"

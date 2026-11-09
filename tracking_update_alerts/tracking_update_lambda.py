@@ -18,6 +18,7 @@ Environment variables::
     TRACK_PAUSED            "1" skips the run
     TRACK_SEND              "1" sends through SES; otherwise emails go to outbox/
     TRACK_POST_COMMENTS     "1" adds the dispatch comments in CargoTel; otherwise they go to outbox/
+    TRACK_ALERTS            "0" switches the hourly emails to the reps off (comments and report carry on); default on
     TRACK_DAYS_AHEAD        pickup ETA before today + this many days (default 2)
     TRACK_STALE_HOURS       a last ping older than this is "not pinging" (default 4)
     TRACK_GPS_DAYS          GPS history window in days (default 2, what the GPS link itself shows)
@@ -97,6 +98,8 @@ def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | Non
         args.append("--send")
     if flag(env, "TRACK_POST_COMMENTS"):
         args.append("--post-comments")
+    if "TRACK_ALERTS" in env and env["TRACK_ALERTS"].strip() and not flag(env, "TRACK_ALERTS"):
+        args.append("--no-alerts")
     if flag(env, "TRACK_SAVE_PAGES"):
         args += ["--save-html", os.path.join(work, "pages")]
     return args

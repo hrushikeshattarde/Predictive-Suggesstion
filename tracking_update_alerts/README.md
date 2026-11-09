@@ -141,6 +141,16 @@ loads with issues (41 with no GPS pings, 11 quiet for more than 11 h)`. A run at
 11 h, 57 fine; Kingbee 26, Stellantis 10, Enterprise Utah 5, Kar Korner 5, ...; Victoria
 Storm 20, Juan Bernal 13, Kyle Link 5, ...
 
+### Alerts off, comments and report on (since 2026-11-09 14:40 ET)
+
+At the user's request the hourly emails to the reps are switched off: `deploy.ps1 -Send
+-PostComments -NoAlerts` sets `TRACK_ALERTS=0`, which the handler turns into `--no-alerts`.
+The run still reads every GPS page, writes the last ping into the dispatch comments every
+hour and sends the report at 07:00, 11:00, 15:00 and 18:00 (its trailer then says the
+alerts are off). The alert state is left alone, so when the alerts come back
+(`deploy.ps1 -Send -PostComments`, without `-NoAlerts`) every load not pinging is alerted
+as if for the first time.
+
 ## Running it
 
 ```bash
