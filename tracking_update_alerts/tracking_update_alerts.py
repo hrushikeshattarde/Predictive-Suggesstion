@@ -41,6 +41,18 @@ What it does, once per run:
    stays stale, or at once when its state or owners change; a ping is written as a
    comment once. Dry runs (no ``--send`` / ``--post-comments``) write the emails and the
    comments to ``outbox/`` and leave the state alone.
+6. Twice a day (the 10:00 and 16:00 ET runs; ``--report-hours``) send the operations
+   manager a report of the whole screen, the Dispatched loads above plus the In-Route
+   ones (``--report-status``), which are GPS-checked for the report only (no comments,
+   no alerts): how many loads were scanned with and without issues per status, per
+   customer and per dispatch rep, then every load with no GPS pings and every driver
+   whose last ping is more than ``--report-quiet-hours`` (11) old, listed by customer
+   and dispatch rep. ``--report`` sends it from any run (with ``--redirect-to`` for a
+   look first).
+
+Within a run the emails and the report go out first and the alert state is saved (and,
+on AWS, checkpointed to S3); the comment form is posted last, because CargoTel takes
+minutes to re-render the screen for it and a timeout there must cost the comments only.
 
 Usage::
 
@@ -101,9 +113,10 @@ from suggest_reloads import nice_name  # noqa: E402
 __all__ = [
     "ACTIVE", "NEVER", "STALE", "UNKNOWN",
     "AlertState", "CommentState", "GpsLoad", "MailGroup", "OutboxTransport", "Ping",
-    "build_comment_post", "check_gps", "classify", "comment_text", "compose", "customer_excluded", "eta_cutoff", "form_fields",
-    "gps_params", "grid_params", "load_from_row", "mail_groups", "main", "needs_comment", "nice_place",
-    "parse_ping_stamp", "parse_pings", "parse_stamp", "plan_comments", "run_once", "select_loads", "verify_comments",
+    "build_comment_post", "check_gps", "classify", "comment_text", "compose", "compose_report", "customer_excluded", "eta_cutoff",
+    "form_fields", "gps_params", "grid_params", "load_from_row", "mail_groups", "main", "needs_comment", "nice_place",
+    "parse_ping_stamp", "parse_pings", "parse_report_hours", "parse_stamp", "plan_comments", "report_breakdowns", "report_bucket", "report_due",
+    "report_loads", "run_once", "select_loads", "verify_comments",
 ]
 
 SEARCH_ID = "2077"
@@ -133,6 +146,16 @@ DEFAULT_ESCALATE = ("justice.cromwell@circledelivers.com", "smitchell@circledeli
 #: case-insensitive part of the customer name. Merchants Automotive Group Holdings LLC
 #: (id 81464) at the user's request, 2026-11-06.
 DEFAULT_EXCLUDE_CUSTOMERS = ("81464", "Merchants Automotive")
+#: The daily report for the operations manager (user's request, 2026-11-06): every load
+#: with no GPS pings and every driver quiet for longer than DEFAULT_REPORT_QUIET_HOURS,
+#: by customer and dispatch rep. Sent by the run(s) whose Eastern hour is listed in
+#: DEFAULT_REPORT_HOURS ("all" = every run), once per hour slot. 10:00 and 16:00 ET: the user's choice.
+DEFAULT_REPORT_TO = ("justice.cromwell@circledelivers.com",)
+DEFAULT_REPORT_HOURS: tuple[int, ...] | str = (10, 16)
+DEFAULT_REPORT_QUIET_HOURS = 11.0
+#: Statuses scanned for the report only (no comments, no alerts): the In-Route loads on
+#: the same screen, asked for on 2026-11-09.
+DEFAULT_REPORT_STATUSES = ("In-Route",)
 #: Columns added to the saved view on the GET (extras only, see cargotel_search notes):
 #: the sales reps, and the customer. ``consignor`` reads "N/A" on EDI loads (every
 #: Stellantis load); ``original_consignor`` and ``cons_id`` carry the real customer.
@@ -1058,6 +1081,416 @@ def compose(group: MailGroup, *, now: datetime, stale_hours: float = DEFAULT_STA
 
 
 # --------------------------------------------------------------------------- #
+# The daily report                                                             #
+# --------------------------------------------------------------------------- #
+
+
+def parse_report_hours(text: str | None) -> tuple[int, ...] | str:
+    """``"8"`` or ``"8,14"``: the hours of day whose run sends the report; ``"all"``: every
+    run; ``""``, ``"never"`` or ``"-"``: no report."""
+
+    value = (text or "").strip().lower()
+    if value in ("", "never", "none", "off", "-"):
+        return ()
+    if value in ("all", "every", "*"):
+        return "all"
+    hours: set[int] = set()
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit() or not 0 <= int(part) <= 23:
+            raise ValueError(f"report hour must be 0-23, 'all' or 'never', not {part!r}")
+        hours.add(int(part))
+    return tuple(sorted(hours))
+
+
+def report_due(now: datetime, report_hours: tuple[int, ...] | str) -> bool:
+    return report_hours == "all" or now.hour in report_hours
+
+
+def _customer_key(load: GpsLoad) -> str:
+    # By name, not id: CargoTel has customer records that share a name (two "Circle Logistics"
+    # on 2026-11-09), and the reader thinks in names.
+    return (load.customer or "").strip().lower() or (f"id {load.customer_id}" if load.customer_id else "?")
+
+
+def _customer_label(load: GpsLoad) -> str:
+    return load.customer or (f"customer {load.customer_id}" if load.customer_id else "customer ?")
+
+
+def _dispatch_label(load: GpsLoad) -> str:
+    return nice_name(load.dispatch_rep) if load.dispatch_rep else "no dispatch rep"
+
+
+def _report_key(load: GpsLoad) -> tuple[Any, ...]:
+    return ((load.customer or "~").lower(), load.customer_id, load.dispatch_key or "~", load.pickup_eta or datetime.max, load.load_id)
+
+
+def report_loads(loads: list[GpsLoad], now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS) -> tuple[list[GpsLoad], list[GpsLoad]]:
+    """``(never, quiet)`` for the report: the loads with no ping in the GPS window, and the
+    loads whose driver pinged but not within ``quiet_hours`` (its own threshold, apart from
+    the 4 h one the alerts use). Both sorted by customer, dispatch rep, pickup ETA."""
+
+    never = [l for l in loads if l.tracking == NEVER]
+    quiet = [l for l in loads if l.tracking in (ACTIVE, STALE) and (l.hours_since_ping(now) or 0.0) > quiet_hours]
+    return sorted(never, key=_report_key), sorted(quiet, key=_report_key)
+
+
+def report_bucket(load: GpsLoad, now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS) -> str:
+    """How the report counts a load: ``never`` (no ping in the window), ``quiet`` (last
+    ping older than ``quiet_hours``), ``ok`` (pinged within them) or ``unknown`` (GPS page
+    unreadable). ``never`` and ``quiet`` are the "issues"."""
+
+    if load.tracking == UNKNOWN:
+        return UNKNOWN
+    if load.tracking == NEVER:
+        return NEVER
+    return QUIET if (load.hours_since_ping(now) or 0.0) > quiet_hours else OK
+
+
+QUIET = "quiet"
+OK = "ok"
+TALLY_KEYS = ("scanned", NEVER, QUIET, OK, UNKNOWN)
+
+
+def _tally() -> dict[str, int]:
+    return {k: 0 for k in TALLY_KEYS}
+
+
+def _tally_add(tally: dict[str, int], bucket: str) -> None:
+    tally["scanned"] += 1
+    tally[bucket] += 1
+
+
+def _issues(tally: dict[str, int]) -> int:
+    return tally[NEVER] + tally[QUIET]
+
+
+def _status_groups(loads: list[GpsLoad], status_order: tuple[str, ...] | list[str]) -> list[tuple[str, list[GpsLoad]]]:
+    """``[(status label, loads)]`` in the configured order (every configured status, even
+    with no loads), then any other status seen."""
+
+    groups: list[tuple[str, list[GpsLoad]]] = []
+    seen: set[str] = set()
+    for label in list(status_order) + [l.status for l in loads]:
+        key = label.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            groups.append((label.strip(), [l for l in loads if l.status.strip().lower() == key]))
+    return groups
+
+
+def report_breakdowns(loads: list[GpsLoad], now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
+                      status_order: tuple[str, ...] | list[str] = DEFAULT_STATUSES + DEFAULT_REPORT_STATUSES) -> dict[str, Any]:
+    """The counts behind the report. ``"statuses"``: the status labels in order;
+    ``"status"``: ``[(status, tally)]`` plus ``("All", tally)``; ``"customer"`` and
+    ``"dispatch_rep"``: ``[(label, {status: tally}, all_tally)]``, the most issues first.
+    A tally is ``{scanned, never, quiet, ok, unknown}``."""
+
+    groups = _status_groups(loads, status_order)
+    statuses = [label for label, _members in groups]
+    by_status: list[tuple[str, dict[str, int]]] = []
+    total = _tally()
+    for label, members in groups:
+        tally = _tally()
+        for load in members:
+            bucket = report_bucket(load, now, quiet_hours)
+            _tally_add(tally, bucket)
+            _tally_add(total, bucket)
+        by_status.append((label, tally))
+    out: dict[str, Any] = {"statuses": statuses, "status": by_status + [("All", total)]}
+    for name, key, label_of in (("customer", _customer_key, _customer_label),
+                                ("dispatch_rep", lambda l: l.dispatch_key or "~", _dispatch_label)):
+        rows: dict[str, tuple[str, dict[str, dict[str, int]], dict[str, int]]] = {}
+        for label, members in groups:
+            for load in members:
+                k = key(load)
+                if k not in rows:
+                    rows[k] = (label_of(load), {s: _tally() for s in statuses}, _tally())
+                bucket = report_bucket(load, now, quiet_hours)
+                _tally_add(rows[k][1][label], bucket)
+                _tally_add(rows[k][2], bucket)
+        out[name] = sorted(rows.values(), key=lambda r: (-_issues(r[2]), -r[2]["scanned"], r[0].lower()))
+    return out
+
+
+def _report_greeting(to: list[str], reps: dict[str, dict[str, str]] | None) -> str:
+    by_email = {(v.get("email") or "").strip().lower(): k for k, v in (reps or {}).items() if v.get("email")}
+    names = []
+    for address in to:
+        key = by_email.get(address.strip().lower())
+        if key:
+            names.append(_first_name(nice_name(key)))
+        else:
+            local = address.split("@")[0]
+            names.append(local.split(".")[0].capitalize() if "." in local else "")
+    if not names or not all(names):
+        return "Hi all,"
+    if len(names) == 1:
+        return f"Hi {names[0]},"
+    return f"Hi {', '.join(names[:-1])} and {names[-1]},"
+
+
+def _text_table(headers: list[str], rows: list[tuple[Any, ...] | list[Any]],
+                groups: list[tuple[str, int, int]] | None = None) -> list[str]:
+    """A fixed-width table; ``groups`` = ``[(title, first column, span)]`` adds a row of
+    column-group titles above the headers."""
+
+    widths = [max([len(str(h))] + [len(str(r[i])) for r in rows]) for i, h in enumerate(headers)]
+
+    def fmt(cells: tuple[Any, ...] | list[Any]) -> str:
+        return "  ".join(str(c).ljust(w) if i == 0 else str(c).rjust(w) for i, (c, w) in enumerate(zip(cells, widths)))
+
+    lines = []
+    if groups:
+        parts = [" " * widths[0]]
+        for title, first, span in groups:
+            width = sum(widths[first:first + span]) + 2 * (span - 1)
+            parts.append(title.ljust(width)[:width])
+        lines.append(("  " + "  ".join(parts)).rstrip())
+    lines += ["  " + fmt(headers), "  " + fmt(["-" * w for w in widths])] + ["  " + fmt(r) for r in rows]
+    return lines
+
+
+def _report_line(load: GpsLoad, now: datetime) -> str:
+    bits = [f"{'Load' if load.kind == 'load' else 'Order'} {load.load_id}", load.status or "status ?",
+            f"{load.origin or '?'} -> {load.dest or '?'}", f"pickup ETA {_fmt_eta(load.pickup_eta)}"]
+    carrier = load.carrier or "carrier ?"
+    if load.driver:
+        carrier += f", driver {nice_name(load.driver)}" + (f" {load.driver_phone}" if load.driver_phone else "")
+    bits.append(carrier)
+    if load.last_ping is not None:
+        bits.append(f"last ping {_fmt_ping(load.last_ping, now)}")
+    bits.append(f"sales rep {nice_name(load.sales_rep) if load.sales_rep else 'none'}")
+    if load.last_comment:
+        bits.append(f"last dispatch comment ({load.last_comment_at}): {load.last_comment}")
+    return "  |  ".join(bits)
+
+
+def _report_text_section(title: str, members: list[GpsLoad], now: datetime, hint: str) -> list[str]:
+    lines = [f"{title.upper()} ({len(members)})", hint, ""]
+    if not members:
+        return lines + ["  none", ""]
+    i = 0
+    while i < len(members):
+        customer = [l for l in members if _customer_key(l) == _customer_key(members[i])]
+        lines.append(f"{_customer_label(members[i])} ({len(customer)})")
+        j = 0
+        while j < len(customer):
+            rep = [l for l in customer if l.dispatch_key == customer[j].dispatch_key]
+            lines.append(f"  {_dispatch_label(customer[j])} ({len(rep)})")
+            lines += ["    " + _report_line(l, now) for l in rep]
+            j += len(rep)
+        lines.append("")
+        i += len(customer)
+    return lines
+
+
+_TD = '<td style="padding:4px 8px;border-bottom:1px solid #ddd;vertical-align:top">'
+_TH = '<th style="text-align:left;padding:4px 8px;border-bottom:2px solid #999">'
+_TH_GROUP = '<th style="text-align:center;padding:4px 8px;border-bottom:1px solid #bbb">'
+_TD_NUM = '<td style="padding:4px 8px;border-bottom:1px solid #ddd;text-align:right">'
+
+
+def _report_html_table(members: list[GpsLoad], now: datetime, *, with_ping: bool) -> str:
+    esc = html_lib.escape
+    headers = ["Customer", "Dispatch rep", "Load", "Status", "Lane", "Carrier / driver", "Pickup ETA"] \
+        + (["Last GPS ping"] if with_ping else []) + ["Sales rep", "Last dispatch comment"]
+    rows = []
+    for load in members:
+        carrier = esc(load.carrier or "?")
+        if load.driver:
+            carrier += (f"<br><small>driver {esc(nice_name(load.driver))}" + (f" {esc(load.driver_phone)}" if load.driver_phone else "") + "</small>")
+        comment = ""
+        if load.last_comment:
+            comment = (f"{esc(load.last_comment)}<br><small>{esc(load.last_comment_at)}"
+                       + (f", {esc(nice_name(load.last_comment_by))}" if load.last_comment_by else "") + "</small>")
+        cells = [esc(_customer_label(load)), esc(_dispatch_label(load)),
+                 f'<a href="{esc(load.url)}">{esc(load.load_id)}</a>' + ("" if load.kind == "load" else "<br><small>order</small>")
+                 + (f'<br><small><a href="{esc(load.gps_url)}">GPS history</a></small>' if load.gps_url else ""),
+                 esc(load.status or "?"),
+                 f"{esc(load.origin)}<br>&rarr; {esc(load.dest)}" + (f"<br><small>{esc(load.dest_name)}</small>" if load.dest_name else ""),
+                 carrier, esc(_fmt_eta(load.pickup_eta))]
+        if with_ping:
+            if load.last_ping is None:
+                cells.append("none")
+            else:
+                local = _local(load.last_ping.when, now)
+                cells.append(f'<b style="color:#b00020">{esc(local.strftime("%a %m/%d %H:%M"))}</b> {esc(load.last_ping.where)}'
+                             f"<br><small>{esc(ago_text((now - load.last_ping.when).total_seconds() / 3600))}</small>")
+        cells += [esc(nice_name(load.sales_rep) if load.sales_rep else "none"), comment]
+        rows.append("<tr>" + "".join(_TD + c + "</td>" for c in cells) + "</tr>")
+    th = "".join(_TH + esc(h) + "</th>" for h in headers)
+    return f'<table style="border-collapse:collapse;font-size:13px"><tr>{th}</tr>{"".join(rows)}</table>'
+
+
+def _num(n: int, strong: bool = False) -> str:
+    return _TD_NUM + (f"<b>{n}</b>" if strong else str(n)) + "</td>"
+
+
+def _issue_num(n: int) -> str:
+    return _TD_NUM + (f'<b style="color:#b00020">{n}</b>' if n else "0") + "</td>"
+
+
+def _status_table_html(by_status: list[tuple[str, dict[str, int]]], hours: str, show_unknown: bool) -> str:
+    esc = html_lib.escape
+    headers = ["Status", "Scanned", "With issues", "No GPS pings", f"Quiet > {hours} h", "Without issues"] + (["Unreadable"] if show_unknown else [])
+    th = "".join(_TH + esc(h) + "</th>" for h in headers)
+    body = ""
+    for label, t in by_status:
+        strong = label == "All"
+        cells = [_TD + (f"<b>{esc(label)}</b>" if strong else esc(label)) + "</td>", _num(t["scanned"], strong), _issue_num(_issues(t)),
+                 _num(t[NEVER], strong), _num(t[QUIET], strong), _num(t[OK], strong)] + ([_num(t[UNKNOWN], strong)] if show_unknown else [])
+        body += "<tr>" + "".join(cells) + "</tr>"
+    return f'<table style="border-collapse:collapse;font-size:13px"><tr>{th}</tr>{body}</table>'
+
+
+def _breakdown_html(title: str, first: str, rows: list[tuple[str, dict[str, dict[str, int]], dict[str, int]]],
+                    statuses: list[str], hours: str, show_unknown: bool) -> str:
+    esc = html_lib.escape
+    if not rows:
+        return ""
+    all_cols = ["scanned", "no GPS pings", f"quiet > {hours} h", "OK"] + (["unreadable"] if show_unknown else [])
+    head1 = (f'<tr><th rowspan="2" style="text-align:left;padding:4px 8px;border-bottom:2px solid #999;vertical-align:bottom">{esc(first)}</th>'
+             + "".join(f'{_TH_GROUP[:-1]} colspan="3">{esc(s)}</th>' for s in statuses)
+             + f'{_TH_GROUP[:-1]} colspan="{len(all_cols)}">All</th></tr>')
+    head2 = ("<tr>" + "".join(_TH + c + "</th>" for _s in statuses for c in ("scanned", "issues", "OK"))
+             + "".join(_TH + esc(c) + "</th>" for c in all_cols) + "</tr>")
+
+    def cells_for(per_status: dict[str, dict[str, int]], total: dict[str, int], strong: bool) -> str:
+        out = ""
+        for s in statuses:
+            t = per_status[s]
+            out += _num(t["scanned"], strong) + _issue_num(_issues(t)) + _num(t[OK], strong)
+        out += _num(total["scanned"], strong) + _issue_num(total[NEVER]) + _issue_num(total[QUIET]) + _num(total[OK], strong)
+        if show_unknown:
+            out += _num(total[UNKNOWN], strong)
+        return out
+
+    body = "".join(f"<tr>{_TD}{esc(label)}</td>{cells_for(per_status, total, False)}</tr>" for label, per_status, total in rows)
+    sum_status = {s: _tally() for s in statuses}
+    sum_all = _tally()
+    for _label, per_status, total in rows:
+        for s in statuses:
+            for k in TALLY_KEYS:
+                sum_status[s][k] += per_status[s][k]
+        for k in TALLY_KEYS:
+            sum_all[k] += total[k]
+    body += f"<tr>{_TD}<b>Total</b></td>{cells_for(sum_status, sum_all, True)}</tr>"
+    return (f'<h3 style="margin:16px 0 4px">{esc(title)}</h3>'
+            f'<table style="border-collapse:collapse;font-size:13px">{head1}{head2}{body}</table>')
+
+
+def _breakdown_text(first: str, rows: list[tuple[str, dict[str, dict[str, int]], dict[str, int]]], statuses: list[str], hours: str,
+                    show_unknown: bool) -> list[str]:
+    headers = [first]
+    groups: list[tuple[str, int, int]] = []
+    for s in statuses:
+        groups.append((s, len(headers), 3))
+        headers += ["scanned", "issues", "OK"]
+    all_cols = ["scanned", "no pings", f"quiet>{hours}h", "OK"] + (["unreadable"] if show_unknown else [])
+    groups.append(("All", len(headers), len(all_cols)))
+    headers += all_cols
+    table: list[list[Any]] = []
+    for label, per_status, total in rows:
+        cells: list[Any] = [label]
+        for s in statuses:
+            t = per_status[s]
+            cells += [t["scanned"], _issues(t), t[OK]]
+        cells += [total["scanned"], total[NEVER], total[QUIET], total[OK]] + ([total[UNKNOWN]] if show_unknown else [])
+        table.append(cells)
+    return _text_table(headers, table, groups)
+
+
+def compose_report(
+    loads: list[GpsLoad],
+    *,
+    now: datetime,
+    to: list[str],
+    reps: dict[str, dict[str, str]] | None = None,
+    quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
+    gps_days: int = DEFAULT_GPS_DAYS,
+    days_ahead: int = DEFAULT_DAYS_AHEAD,
+    statuses: tuple[str, ...] | list[str] = DEFAULT_STATUSES,
+    report_statuses: tuple[str, ...] | list[str] = DEFAULT_REPORT_STATUSES,
+    exclude_customers: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_CUSTOMERS,
+    counts: dict[str, int] | None = None,
+) -> Email:
+    """The report for the operations manager: the whole screen at a glance. ``loads`` are
+    the alert loads (``statuses``) plus the report-only ones (``report_statuses``, In-Route),
+    all GPS-checked. Counts per status, then per customer and per dispatch rep (scanned,
+    with issues, without issues, per status and overall), then every load with no GPS
+    pings and every load whose driver has been quiet for more than ``quiet_hours``,
+    listed by customer and dispatch rep. Plain text and HTML."""
+
+    never, quiet = report_loads(loads, now, quiet_hours)
+    unknown = [l for l in loads if l.tracking == UNKNOWN]
+    hours = f"{quiet_hours:g}"
+    breakdown = report_breakdowns(loads, now, quiet_hours, tuple(statuses) + tuple(report_statuses))
+    status_labels: list[str] = breakdown["statuses"]
+    total = breakdown["status"][-1][1]
+    show_unknown = total[UNKNOWN] > 0
+    cutoff = eta_cutoff(now, days_ahead)
+    stamp = f"{now:%a %m/%d %H:%M}"
+
+    issues = _issues(total)
+    parts = [(c, phrase) for c, phrase in ((total[NEVER], "with no GPS pings"), (total[QUIET], f"quiet for more than {hours} h")) if c]
+    if not issues:
+        subject = f"GPS tracking report {stamp}: all {total['scanned']} loads scanned are pinging"
+    else:
+        subject = (f"GPS tracking report {stamp}: {issues} of {total['scanned']} loads with issues ("
+                   + ", ".join(f"{c} {p}" for c, p in parts) + ")")
+
+    greeting = _report_greeting(to, reps)
+    left_out = [p for p in exclude_customers if not p.strip().isdigit()]
+    excluded = ""
+    if counts and counts.get("excluded") and left_out:
+        excluded = f"; {counts['excluded']} {', '.join(left_out)} load{'s' if counts['excluded'] != 1 else ''} left out"
+    scanned_desc = " and ".join(f"{t['scanned']} {label}" for label, t in breakdown["status"][:-1]) + " loads"
+    intro = (f"GPS tracking report as of {_fmt_when(now)}: {SEARCH_NAME} ({SEARCH_PATH}) shows {scanned_desc} with a pickup ETA "
+             f"before {cutoff:%m/%d/%Y}{excluded}. Each load's GPS history (its \"GPS City/St Link\") was checked over the last "
+             f"{gps_days} days; a load has an issue when it has no ping at all or its last ping is older than {hours} hours.")
+    sections = [
+        ("No GPS pings", never, f"No position from the tracking app in the last {gps_days} days.", False),
+        (f"Quiet for more than {hours} h", quiet, f"The driver was pinging, but the last position is older than {hours} hours.", True),
+    ]
+    trailer = (f"The reps get the hourly GPS alerts for the {'/'.join(statuses)} loads separately (a driver quiet for more than 4 h, "
+               f"or never pinging, repeated every 4 h); the {'/'.join(report_statuses) or 'other'} loads are scanned for this report only "
+               f"and get no comments or alerts. Generated from {SEARCH_NAME}; reply to this email if a load is mis-assigned.")
+
+    status_headers = ["status", "scanned", "with issues", "no GPS pings", f"quiet > {hours} h", "without issues"] + (["unreadable"] if show_unknown else [])
+    status_rows = [[label, t["scanned"], _issues(t), t[NEVER], t[QUIET], t[OK]] + ([t[UNKNOWN]] if show_unknown else [])
+                   for label, t in breakdown["status"]]
+    text_parts = [greeting, "", intro, ""]
+    text_parts += ["SCANNED"] + _text_table(status_headers, status_rows) + [""]
+    text_parts += ["BY CUSTOMER"] + _breakdown_text("customer", breakdown["customer"], status_labels, hours, show_unknown) + [""]
+    text_parts += ["BY DISPATCH REP"] + _breakdown_text("dispatch rep", breakdown["dispatch_rep"], status_labels, hours, show_unknown) + [""]
+    for title, members, hint, _with_ping in sections:
+        text_parts += _report_text_section(title, members, now, hint)
+    if unknown:
+        text_parts += [f"GPS PAGE UNREADABLE ({len(unknown)}): " + ", ".join(l.load_id for l in unknown), ""]
+    text_parts.append(trailer)
+    text = "\n".join(text_parts)
+
+    esc = html_lib.escape
+    blocks = [_status_table_html(breakdown["status"], hours, show_unknown),
+              _breakdown_html("By customer", "Customer", breakdown["customer"], status_labels, hours, show_unknown),
+              _breakdown_html("By dispatch rep", "Dispatch rep", breakdown["dispatch_rep"], status_labels, hours, show_unknown)]
+    for title, members, hint, with_ping in sections:
+        blocks.append(f'<h3 style="margin:20px 0 2px">{esc(title)} ({len(members)})</h3><p style="margin:0 0 6px;color:#444">{esc(hint)}</p>'
+                      + (_report_html_table(members, now, with_ping=with_ping) if members else "<p>none</p>"))
+    if unknown:
+        blocks.append(f'<p style="color:#444">GPS page unreadable ({len(unknown)}): '
+                      + ", ".join(f'<a href="{esc(l.url)}">{esc(l.load_id)}</a>' for l in unknown) + "</p>")
+    html = ('<html><body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222">'
+            f"<p>{esc(greeting)}</p><p>{esc(intro)}</p>" + "".join(blocks)
+            + f'<p style="font-size:12px;color:#666;margin-top:16px">{esc(trailer)}</p></body></html>')
+    return Email(key="report", rep=None, to=list(to), cc=[], subject=subject, text=text, html=html,
+                 load_ids=[l.load_id for l in never + quiet])
+
+
+# --------------------------------------------------------------------------- #
 # State and transports                                                         #
 # --------------------------------------------------------------------------- #
 
@@ -1079,16 +1512,31 @@ class OutboxTransport(FileTransport):
 
 
 class AlertState:
-    """``alert_state.json``: ``{"sent": {load_id: {"tracking", "group", "at"}}}``. A load is
-    alerted again after ``repeat_hours``, or at once when its state or owners changed."""
+    """``alert_state.json``: ``{"sent": {load_id: {"tracking", "group", "at"}}, "report": {"slot", "at"}}``.
+    A load is alerted again after ``repeat_hours``, or at once when its state or owners
+    changed; the report goes once per hour slot (a second run in the same hour, say a
+    manual one, does not send it again)."""
 
     def __init__(self, path: str | None) -> None:
         self.path = path
         self.sent: dict[str, dict[str, str]] = {}
+        self.report: dict[str, str] = {}
         if path and os.path.exists(path):
             with open(path, encoding="utf-8") as handle:
                 data = json.load(handle)
-            self.sent = data.get("sent", {}) if isinstance(data, dict) else {}
+            if isinstance(data, dict):
+                self.sent = data.get("sent", {})
+                self.report = data.get("report", {}) or {}
+
+    @staticmethod
+    def _slot(now: datetime) -> str:
+        return now.strftime("%Y-%m-%d %H")
+
+    def report_sent(self, now: datetime) -> bool:
+        return self.report.get("slot") == self._slot(now)
+
+    def mark_report(self, now: datetime) -> None:
+        self.report = {"slot": self._slot(now), "at": now.isoformat(timespec="seconds")}
 
     @staticmethod
     def _signature(load: GpsLoad) -> tuple[str, str]:
@@ -1131,7 +1579,7 @@ class AlertState:
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump({"updated": datetime.now().isoformat(timespec="seconds"), "sent": self.sent}, handle, indent=2)
+            json.dump({"updated": datetime.now().isoformat(timespec="seconds"), "sent": self.sent, "report": self.report}, handle, indent=2)
         os.replace(tmp, self.path)
 
 
@@ -1238,11 +1686,17 @@ def run_once(
     stellantis_to: list[str] | tuple[str, ...] = DEFAULT_STELLANTIS_TO,
     escalate: list[str] | tuple[str, ...] = DEFAULT_ESCALATE,
     default_manager: list[str] | tuple[str, ...] = (),
+    report_to: list[str] | tuple[str, ...] = DEFAULT_REPORT_TO,
+    report_hours: tuple[int, ...] | str = DEFAULT_REPORT_HOURS,
+    report_quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
+    report_statuses: tuple[str, ...] | list[str] = DEFAULT_REPORT_STATUSES,
+    force_report: bool = False,
     max_gps: int = DEFAULT_MAX_GPS,
     save_gps: str | None = None,
     redirect_to: list[str] | None = None,
     only_rep: str | None = None,
     only_loads: set[str] | None = None,
+    checkpoint: Callable[[], None] | None = None,
     log: Callable[[str], None] = lambda m: None,
 ) -> dict[str, Any]:
     """Select, check GPS, comment, group, compose, send. ``record=False`` (dry run)
@@ -1251,7 +1705,12 @@ def run_once(
     of CargoTel. ``redirect_to`` sends every email to those addresses as a marked test
     copy that is never recorded; ``only_rep`` limits the emails to the groups with that
     rep ("unassigned" and "stellantis" work too); ``only_loads`` limits the whole run
-    (GPS checks, comments and emails) to those load ids, for tests."""
+    (GPS checks, comments and emails) to those load ids, for tests. The report goes to
+    ``report_to`` when the run's hour is in ``report_hours`` (or ``force_report``), once
+    per hour slot; ``only_rep`` runs skip it unless forced. When it is due, the loads in
+    ``report_statuses`` (In-Route) are selected and GPS-checked too, for the report alone.
+    ``checkpoint`` is called once the emails are out and the alert state is saved, before
+    the comment phase."""
 
     loads, warnings, counts = select_loads(grid, now, days_ahead=days_ahead, statuses=statuses, exclude_customers=exclude_customers)
     for warning in warnings:
@@ -1269,41 +1728,28 @@ def run_once(
     log(f"GPS: {by_state[ACTIVE]} active (pinged within {stale_hours:g} h), {by_state[STALE]} stale, {by_state[NEVER]} never pinged "
         f"in {gps_days} days, {by_state[UNKNOWN]} unreadable")
 
+    report_due_now = force_report or (report_due(now, report_hours) and not only_rep)
+    extra: list[GpsLoad] = []
+    extra_counts: dict[str, int] = {"rows": counts["rows"], "in_status": 0, "excluded": 0, "no_eta": 0, "eta_later": 0, "selected": 0}
+    if report_due_now and report_to and report_statuses:
+        extra, extra_warnings, extra_counts = select_loads(grid, now, days_ahead=days_ahead, statuses=report_statuses,
+                                                           exclude_customers=exclude_customers)
+        for warning in extra_warnings:
+            log(warning)
+        if only_loads is not None:
+            extra = [l for l in extra if l.load_id in only_loads]
+        gps_errors += check_gps(extra, gps_fetch, now, stale_hours=stale_hours, max_checks=max(0, max_gps - len(loads)),
+                                save_html=save_gps, log=log)
+        extra_state = {kind: sum(1 for l in extra if l.tracking == kind) for kind in (ACTIVE, STALE, NEVER, UNKNOWN)}
+        log(f"report only: {extra_counts['in_status']} {'/'.join(report_statuses)} loads, {extra_counts['excluded']} of an excluded customer, "
+            f"{len(extra)} with a pickup ETA before {cutoff:%m/%d/%Y}; GPS: {extra_state[ACTIVE]} active, {extra_state[STALE]} stale, "
+            f"{extra_state[NEVER]} never pinged, {extra_state[UNKNOWN]} unreadable")
+
     summary: dict[str, Any] = {"rows": counts["rows"], "selected": len(loads), "counts": counts, "by_state": by_state,
                                "warnings": warnings, "gps_errors": gps_errors, "comments": {}, "comments_planned": 0,
                                "comments_written": 0, "comments_failed": 0, "emails": [], "skipped_repeat": 0}
 
-    # 1. dispatch comments for every load with a ping (still pinging or gone quiet)
-    comments = plan_comments(loads, comment_state)
-    summary["comments_planned"] = len(comments)
-    if comments and post_comments and poster is not None:
-        try:
-            landed = poster.post(page_html, comments)
-        except Exception as exc:  # noqa: BLE001 - the emails must still go out
-            log(f"comment form failed: {exc}")
-            summary["comment_error"] = str(exc)
-            landed = {}
-        for load_id, text in comments.items():
-            ok = landed.get(load_id, False)
-            summary["comments"][load_id] = {"text": text, "written": ok}
-            if ok:
-                summary["comments_written"] += 1
-                ping = next((l.last_ping for l in loads if l.load_id == load_id), None)
-                comment_state.mark(load_id, ping.stamp if ping else "", text, now)
-                log(f"comment added on {load_id}: {text}")
-            else:
-                summary["comments_failed"] += 1
-                log(f"comment NOT found on {load_id} after posting: {text}")
-        comment_state.prune(now)
-        comment_state.save()
-    elif comments:
-        path = write_comment_dump(outbox, comments, loads)
-        summary["comments"] = {load_id: {"text": text, "written": False} for load_id, text in comments.items()}
-        log(f"dry run: {len(comments)} comment(s) would be added (written to {path})")
-    else:
-        log("no comments to add")
-
-    # 2. emails for the loads that are not pinging
+    # 1. emails for the loads that are not pinging
     alerts = [l for l in loads if l.tracking in (STALE, NEVER)]
     if redirect_to:
         record = False
@@ -1343,10 +1789,84 @@ def run_once(
             for load in fresh:
                 state.mark(load, now)
             append_log(sent_log, entry)
+
+    # 2. the report for the operations manager: the whole screen, by customer and dispatch rep
+    summary["report"] = None
+    due = report_due_now
+    if due and not report_to:
+        log("report: due, but nobody to send it to (--report-to is empty); skipped")
+    elif due and record and not force_report and state.report_sent(now):
+        log(f"report: already sent at {state.report.get('at')}; skipped")
+    elif due:
+        scanned = loads + extra
+        never, quiet = report_loads(scanned, now, report_quiet_hours)
+        tallies = report_breakdowns(scanned, now, report_quiet_hours, tuple(statuses) + tuple(report_statuses))["status"]
+        email = compose_report(scanned, now=now, to=list(report_to), reps=reps, quiet_hours=report_quiet_hours, gps_days=gps_days,
+                               days_ahead=days_ahead, statuses=statuses, report_statuses=report_statuses, exclude_customers=exclude_customers,
+                               counts={"excluded": counts["excluded"] + extra_counts["excluded"]})
+        if redirect_to:
+            email = redirect(email, redirect_to)
+        try:
+            message_id = transport.send(email, from_addr)
+        except Exception as exc:  # noqa: BLE001 - the state still gets saved
+            log(f"report: send failed: {exc}")
+            summary.setdefault("send_errors", []).append(f"report: {exc}")
+        else:
+            verb = "report sent" if record else ("report test copy sent" if redirect_to else "report dry run")
+            log(f"{verb}: {email.subject} -> to {', '.join(email.to)} [{message_id}]")
+            log("report: " + "; ".join(f"{label} {t['scanned']} scanned, {t[NEVER] + t[QUIET]} with issues, {t[OK]} without"
+                                       + (f", {t[UNKNOWN]} unreadable" if t[UNKNOWN] else "") for label, t in tallies))
+            entry = {"at": now.isoformat(timespec="seconds"), "report": True, "to": email.to, "cc": email.cc, "subject": email.subject,
+                     "never": [l.load_id for l in never], "quiet": [l.load_id for l in quiet], "scanned": {label: t for label, t in tallies},
+                     "message_id": message_id, "sent": record, "redirected_to": list(redirect_to) if redirect_to else None}
+            summary["report"] = entry
+            if record:
+                state.mark_report(now)
+                append_log(sent_log, entry)
     if record:
         state.prune(now)
         state.save()
+    if checkpoint is not None:
+        # the emails are out: get the alert state off this box before the slow comment phase
+        try:
+            checkpoint()
+        except Exception as exc:  # noqa: BLE001
+            log(f"checkpoint failed: {exc}")
+
+    # 3. dispatch comments for every load with a ping (still pinging or gone quiet). Last, because it is the
+    # slow part (CargoTel re-renders the whole screen on the POST and again on the check, ten minutes on a
+    # busy afternoon): a Lambda timeout here costs the comments only, and the next run retries them.
+    comments = plan_comments(loads, comment_state)
+    summary["comments_planned"] = len(comments)
+    if comments and post_comments and poster is not None:
+        try:
+            landed = poster.post(page_html, comments)
+        except Exception as exc:  # noqa: BLE001 - the run must still finish
+            log(f"comment form failed: {exc}")
+            summary["comment_error"] = str(exc)
+            landed = {}
+        for load_id, text in comments.items():
+            ok = landed.get(load_id, False)
+            summary["comments"][load_id] = {"text": text, "written": ok}
+            if ok:
+                summary["comments_written"] += 1
+                ping = next((l.last_ping for l in loads if l.load_id == load_id), None)
+                comment_state.mark(load_id, ping.stamp if ping else "", text, now)
+                log(f"comment added on {load_id}: {text}")
+            else:
+                summary["comments_failed"] += 1
+                log(f"comment NOT found on {load_id} after posting: {text}")
+        comment_state.prune(now)
+        comment_state.save()
+    elif comments:
+        path = write_comment_dump(outbox, comments, loads)
+        summary["comments"] = {load_id: {"text": text, "written": False} for load_id, text in comments.items()}
+        log(f"dry run: {len(comments)} comment(s) would be added (written to {path})")
+    else:
+        log("no comments to add")
+
     summary["loads"] = [l.to_record(now) for l in loads]
+    summary["report_loads"] = [l.to_record(now) for l in extra]
     return summary
 
 
@@ -1370,7 +1890,7 @@ def _addresses(text: str | None) -> list[str]:
     return [a.strip() for a in (text or "").split(",") if a.strip()]
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--saved-id", default=SEARCH_ID, help=f"CargoTel saved search id (default {SEARCH_ID}, {SEARCH_NAME})")
     parser.add_argument("--days-ahead", type=int, default=DEFAULT_DAYS_AHEAD,
@@ -1391,6 +1911,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--escalate-to", default=",".join(DEFAULT_ESCALATE),
                         help="comma-separated addresses that get an alert when neither rep can be emailed")
     parser.add_argument("--default-manager", default="", help="comma-separated Cc for sales reps with no manager in reps.csv")
+    parser.add_argument("--report-to", default=",".join(DEFAULT_REPORT_TO), metavar="ADDR[,ADDR]",
+                        help="who gets the daily GPS report (default Justice Cromwell; \"\" for nobody)")
+    parser.add_argument("--report-hours", default="all" if DEFAULT_REPORT_HOURS == "all" else ",".join(str(h) for h in DEFAULT_REPORT_HOURS),
+                        metavar="H[,H]|all|never", help="the run(s) that send the report, by hour of day (default 10,16: the 10:00 and 16:00 ET runs)")
+    parser.add_argument("--report-quiet-hours", type=float, default=DEFAULT_REPORT_QUIET_HOURS,
+                        help="the report lists the drivers quiet for longer than this (default 11)")
+    parser.add_argument("--report-status", default=",".join(DEFAULT_REPORT_STATUSES), metavar="STATUS[,...]",
+                        help="statuses scanned for the report only, no comments or alerts (default In-Route; \"\" for none)")
+    parser.add_argument("--report", action="store_true", help="send the report this run whatever the hour (with --redirect-to for a look first)")
     parser.add_argument("--from", dest="from_addr", default=os.environ.get("MAIL_FROM", DEFAULT_FROM), help="verified SES sender")
     parser.add_argument("--send", action="store_true",
                         help="really send through SES; otherwise emails go to --outbox and the alert state is untouched")
@@ -1423,6 +1952,14 @@ def main(argv: list[str] | None = None) -> int:
     redirect_to = _addresses(args.redirect_to) or None
     only_loads = set(_addresses(args.only_load)) if args.only_load else None
     record = args.send and not redirect_to
+    try:
+        report_hours = parse_report_hours(args.report_hours)
+    except ValueError as exc:
+        parser.error(str(exc))
+    report_to = _addresses(args.report_to)
+    report_statuses = tuple(_addresses(args.report_status))
+    report_when = ("every run" if report_hours == "all"
+                   else ("at " + ", ".join(f"{h:02d}:00" for h in report_hours) if report_hours else "never"))
 
     def log(message: str) -> None:
         print(f"{datetime.now():%Y-%m-%d %H:%M:%S} tracking-update: {message}", flush=True)
@@ -1468,6 +2005,8 @@ def main(argv: list[str] | None = None) -> int:
         f"comments {'POSTED to CargoTel' if args.post_comments else 'to the outbox only'}; stale after {args.stale_hours:g} h; "
         f"GPS window {args.gps_days} d; repeat after {args.repeat_hours:g} h; Stellantis -> {args.stellantis_to}; "
         f"escalate -> {args.escalate_to}; excluded customers: {', '.join(exclude_customers) or 'none'}"
+        f"; report {report_when} -> {', '.join(report_to) or 'nobody'}" + (" (forced this run)" if args.report else "")
+        + (f", also scanning {', '.join(report_statuses)}" if report_statuses else "")
         + (f"; TEST COPIES redirected to {', '.join(redirect_to)}, nothing recorded" if redirect_to else "")
         + (f"; only {args.only_rep}" if args.only_rep else "")
         + (f"; only load(s) {', '.join(sorted(only_loads))}" if only_loads else ""))
@@ -1478,12 +2017,15 @@ def main(argv: list[str] | None = None) -> int:
         days_ahead=args.days_ahead, statuses=statuses, exclude_customers=exclude_customers, stale_hours=args.stale_hours,
         gps_days=args.gps_days, repeat_hours=args.repeat_hours, stellantis_to=_addresses(args.stellantis_to),
         escalate=_addresses(args.escalate_to),
-        default_manager=_addresses(args.default_manager), max_gps=args.max_gps, save_gps=save_gps, redirect_to=redirect_to,
-        only_rep=args.only_rep, only_loads=only_loads, log=log,
+        default_manager=_addresses(args.default_manager), report_to=report_to, report_hours=report_hours,
+        report_quiet_hours=args.report_quiet_hours, report_statuses=report_statuses, force_report=args.report, max_gps=args.max_gps,
+        save_gps=save_gps,
+        redirect_to=redirect_to, only_rep=args.only_rep, only_loads=only_loads, checkpoint=checkpoint, log=log,
     )
     log(f"done: {summary['selected']} loads checked, {summary['by_state'][STALE] + summary['by_state'][NEVER]} not pinging, "
         f"{summary['comments_planned']} comment(s) planned, {summary['comments_written']} written, {summary['comments_failed']} failed, "
-        f"{len(summary['emails'])} email(s), {summary['skipped_repeat']} load(s) already alerted, {len(summary['gps_errors'])} GPS error(s)")
+        f"{len(summary['emails'])} email(s), {summary['skipped_repeat']} load(s) already alerted, {len(summary['gps_errors'])} GPS error(s)"
+        + (f"; report: {len(summary['report']['never'])} never pinged, {len(summary['report']['quiet'])} quiet" if summary.get("report") else ""))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump(summary, handle, indent=2, default=str)

@@ -24,6 +24,7 @@ from send_drafts import load_rep_details  # noqa: E402
 from tracking_update_alerts import (  # noqa: E402
     ACTIVE,
     DEFAULT_ESCALATE,
+    DEFAULT_REPORT_TO,
     DEFAULT_STELLANTIS_TO,
     NEVER,
     STALE,
@@ -36,6 +37,7 @@ from tracking_update_alerts import (  # noqa: E402
     classify,
     comment_text,
     compose,
+    compose_report,
     customer_excluded,
     eta_cutoff,
     form_fields,
@@ -48,8 +50,13 @@ from tracking_update_alerts import (  # noqa: E402
     nice_place,
     parse_ping_stamp,
     parse_pings,
+    parse_report_hours,
     parse_stamp,
     plan_comments,
+    report_breakdowns,
+    report_bucket,
+    report_due,
+    report_loads,
     run_once,
     select_loads,
     verify_comments,
@@ -151,8 +158,12 @@ SPECS = {
                    cons_id="70001", sales1="KYLE LINK", comment=("2026-11-06 08:40 EST", "RUBICON BOT", "2026-11-06 08:31:00-05 Joliet, IL")),
     # Bundle member: skipped.
     "360007": dict(n=10, load_id="360007", dispatch_rep="KYLE LINK", eta="11/06/2026 10:00", link_class="LinkBundleChild"),
-    # Not a status the run checks.
-    "360008": dict(n=11, load_id="360008", dispatch_rep="KYLE LINK", eta="11/06/2026 10:00", status="In-Route", customer="Kar Korner, Inc.", cons_id="90888"),
+    # In-Route: not a status the alerts check; scanned for the report only (never pinged).
+    "360008": dict(n=11, load_id="360008", dispatch_rep="KYLE LINK", eta="11/06/2026 10:00", status="In-Route", customer="Kar Korner, Inc.", cons_id="90888",
+                   sales1="KYLE LINK", carrier="Lada Trans Inc", origin="Ocilla, GA", dest_name="", dest="Medina, OH", driver="MOSS, WALTER", phone="(586) 234-3689"),
+    # In-Route, pinging: in the report's counts as "without issues", nowhere else.
+    "360011": dict(n=14, load_id="360011", dispatch_rep="VICTORIA STORM", eta="11/06/2026 12:00", status="In-Route", customer="Kingbee Rentals, LLC",
+                   cons_id="82722", carrier="Kolos Inc", origin="Boise, ID", dest_name="", dest="Denver, CO", driver="ROE, JANE", phone="(208) 555-0199"),
     # GPS page missing: unknown, never emailed.
     "360009": dict(n=12, load_id="360009", dispatch_rep="JACK GIBSON", eta="11/06/2026 10:00", customer="Kar Korner, Inc.", cons_id="90888",
                    sales1="VICTORIA STORM", sales2="KYLE LINK"),
@@ -162,7 +173,7 @@ SPECS = {
 }
 LAYOUT = [("Carrier: 100 MILES TRANSPORT LLC", ["352242", "352243"]), ("Carrier: 312 HAULING LLC", ["354745"]),
           ("Carrier: JRA TRANSPORT INC", ["360001", "360004", "360005", "360006", "360007", "360008"]),
-          ("Carrier: KOLOS INC", ["360002"]), ("Carrier: MWI LLC", ["360003"]), ("Carrier: LADA TRANS INC", ["360009", "360010"])]
+          ("Carrier: KOLOS INC", ["360002", "360011"]), ("Carrier: MWI LLC", ["360003"]), ("Carrier: LADA TRANS INC", ["360009", "360010"])]
 
 FORM_HEAD = ('<FORM name="Menu_alt" method="POST" action="?" id="Menu_alt" autocomplete="off">'
              '<INPUT type="hidden" name="FORM::DEF" value="Menu"><INPUT type="hidden" name="Menu__SUBMITTED" value="1">'
@@ -186,7 +197,7 @@ def build(columns=COLUMNS, *, without=(), replace=None, form=True):
             if replace and lid in replace:
                 spec.update(replace[lid])
             parts.append(row(columns=columns, **spec))
-    grid = "<table>" + header(columns) + "".join(parts) + "</table><div>Rows 1 - 13 of 13</div>"
+    grid = "<table>" + header(columns) + "".join(parts) + "</table><div>Rows 1 - 14 of 14</div>"
     body = (FORM_HEAD + grid + FORM_TAIL) if form else grid
     return f"<html><head><title>Kesh: Tracking Update Screen</title></head><body>{body}</body></html>"
 
@@ -211,6 +222,8 @@ GPS = {
     "360002": gps_page([]),
     "360003": gps_page([("Smith, Ann", "2026-11-03 12:00:00-05", "Ogden,UT")]),
     "360006": gps_page([("Doe, John", "2026-11-06 08:31:00-05", "Joliet,IL")]),
+    "360008": gps_page([]),
+    "360011": gps_page([("Roe, Jane", "2026-11-06 08:45:00-05", "Cheyenne,WY")]),
     "360010": gps_page([("Lee, Bob", "2026-11-06 01:00:00-05", "Gary,IN")]),
 }
 
@@ -273,6 +286,14 @@ def checked_loads(html=PAGE, now=NOW, **kw):
 
 def by_id(loads):
     return {l.load_id: l for l in loads}
+
+
+def scanned_loads(now=NOW):
+    """The alert loads plus the In-Route ones, GPS-checked: what the report sees."""
+    loads, _w, counts = select_loads(parse_grid(PAGE), now)
+    extra, _w2, extra_counts = select_loads(parse_grid(PAGE), now, statuses=("In-Route",))
+    check_gps(loads + extra, fetch_gps, now)
+    return loads + extra, {"excluded": counts["excluded"] + extra_counts["excluded"]}
 
 
 class ParsingTests(unittest.TestCase):
@@ -361,12 +382,12 @@ class LoadTests(unittest.TestCase):
     def test_select_loads_applies_the_screen_rule(self):
         loads, warnings, counts = select_loads(parse_grid(PAGE), NOW)
         self.assertEqual(sorted(l.load_id for l in loads), SELECTED)
-        self.assertEqual(counts, {"rows": 12, "in_status": 11, "excluded": 0, "no_eta": 1, "eta_later": 1, "selected": 9})
+        self.assertEqual(counts, {"rows": 13, "in_status": 11, "excluded": 0, "no_eta": 1, "eta_later": 1, "selected": 9})
         self.assertEqual(warnings, [])
         loads, _w, _c = select_loads(parse_grid(PAGE), NOW, days_ahead=0)
         self.assertNotIn("360001", [l.load_id for l in loads])
         loads, _w, _c = select_loads(parse_grid(PAGE), NOW, statuses=("In-Route",))
-        self.assertEqual([l.load_id for l in loads], ["360008"])
+        self.assertEqual([l.load_id for l in loads], ["360008", "360011"])
 
     def test_excluded_customers_are_left_out_of_the_run(self):
         merchants = dict(customer="Merchants Automotive Group Holdings LLC", cons_id="81464", consignor="N/A")
@@ -656,7 +677,108 @@ class StateTests(unittest.TestCase):
             again = AlertState(path)
             self.assertEqual(sorted(again.sent), ["352243"])
             self.assertFalse(again.should_alert(by_id(loads)["352243"], NOW + timedelta(hours=1), 4))
+            self.assertEqual(again.report, {})
 
+
+class ReportTests(unittest.TestCase):
+    def test_report_hours(self):
+        self.assertEqual(parse_report_hours("8"), (8,))
+        self.assertEqual(parse_report_hours("14, 8"), (8, 14))
+        self.assertEqual(parse_report_hours("all"), "all")
+        for text in ("", "never", "-", None):
+            self.assertEqual(parse_report_hours(text), ())
+        for bad in ("25", "noon", "8,x"):
+            with self.assertRaises(ValueError):
+                parse_report_hours(bad)
+        self.assertTrue(report_due(NOW.replace(hour=8), (8,)))
+        self.assertFalse(report_due(NOW, (8,)))
+        self.assertTrue(report_due(NOW, (8, 9)))
+        self.assertTrue(report_due(NOW, "all"))
+        self.assertFalse(report_due(NOW, ()))
+
+    def test_report_loads_split_never_and_quiet_by_customer_and_rep(self):
+        loads, _w, _c, _e = checked_loads()
+        never, quiet = report_loads(loads, NOW, 11)
+        self.assertEqual([l.load_id for l in never], ["360002", "354745"])  # Kingbee before Stellantis
+        self.assertEqual([l.load_id for l in quiet], ["360003", "352243"])  # 360001 (4.5 h) and 360010 (8 h) pinged within 11 h
+        never, quiet = report_loads(loads, NOW, 4)
+        self.assertEqual([l.load_id for l in quiet], ["360001", "360003", "360010", "352243"])
+        # with the In-Route loads: 360008 never pinged, 360011 pinging
+        scanned, _c = scanned_loads()
+        never, quiet = report_loads(scanned, NOW, 11)
+        self.assertEqual([l.load_id for l in never], ["360008", "360002", "354745"])
+        self.assertEqual([l.load_id for l in quiet], ["360003", "352243"])
+        self.assertEqual([report_bucket(by_id(scanned)[i], NOW) for i in ("360002", "352243", "352242", "360009", "360011")],
+                         [NEVER, "quiet", "ok", UNKNOWN, "ok"])
+        breakdown = report_breakdowns(scanned, NOW, 11)
+        self.assertEqual(breakdown["statuses"], ["Dispatched", "In-Route"])
+        self.assertEqual(breakdown["status"], [
+            ("Dispatched", {"scanned": 9, "never": 2, "quiet": 2, "ok": 4, "unknown": 1}),
+            ("In-Route", {"scanned": 2, "never": 1, "quiet": 0, "ok": 1, "unknown": 0}),
+            ("All", {"scanned": 11, "never": 3, "quiet": 2, "ok": 5, "unknown": 1})])
+        self.assertEqual([(label, total["scanned"], total["never"] + total["quiet"], total["ok"]) for label, _per, total in breakdown["customer"]],
+                         [("Stellantis (fca)", 3, 2, 1), ("Kar Korner, Inc.", 3, 1, 1), ("Kingbee Rentals, LLC", 2, 1, 1),
+                          ("Enterprise Rent-a-car Company Of Utah, LLC", 1, 1, 0), ("Avis Trucks", 2, 0, 2)])
+        kar = [row for row in breakdown["customer"] if row[0] == "Kar Korner, Inc."][0]
+        self.assertEqual(kar[1]["Dispatched"], {"scanned": 2, "never": 0, "quiet": 0, "ok": 1, "unknown": 1})
+        self.assertEqual(kar[1]["In-Route"], {"scanned": 1, "never": 1, "quiet": 0, "ok": 0, "unknown": 0})
+        self.assertEqual([(label, total["scanned"], total["never"] + total["quiet"]) for label, _per, total in breakdown["dispatch_rep"]],
+                         [("Kyle Link", 3, 1), ("Kaleb Hamman", 2, 1), ("Victoria Storm", 2, 1), ("Joseph Camilleri", 1, 1),
+                          ("Podge Ormsby", 1, 1), ("Jack Gibson", 2, 0)])
+        # a status with no loads keeps its (empty) column
+        only = report_breakdowns([l for l in scanned if l.status == "Dispatched"], NOW, 11)
+        self.assertEqual(only["status"][1], ("In-Route", {"scanned": 0, "never": 0, "quiet": 0, "ok": 0, "unknown": 0}))
+
+    def test_compose_report(self):
+        scanned, counts = scanned_loads()
+        email = compose_report(scanned, now=NOW, to=list(DEFAULT_REPORT_TO), reps=REPS, counts=counts)
+        self.assertEqual(email.key, "report")
+        self.assertEqual((email.to, email.cc), (["justice.cromwell@circledelivers.com"], []))
+        self.assertEqual(email.subject, "GPS tracking report Fri 11/06 09:00: 5 of 11 loads with issues (3 with no GPS pings, 2 quiet for more than 11 h)")
+        self.assertEqual(email.load_ids, ["360008", "360002", "354745", "360003", "352243"])
+        text = email.text
+        self.assertTrue(text.startswith("Hi Justice,\n"))
+        self.assertIn("shows 9 Dispatched and 2 In-Route loads with a pickup ETA before 11/08/2026.", text)
+        self.assertIn("SCANNED\n", text)
+        self.assertIn("  Dispatched        9            4             2             2               4           1\n", text)
+        self.assertIn("  In-Route          2            1             1             0               1           0\n", text)
+        self.assertIn("  All              11            5             3             2               5           1\n", text)
+        self.assertIn("BY CUSTOMER\n", text)
+        self.assertIn("  customer                                    scanned  issues  OK  scanned  issues  OK  scanned  no pings  quiet>11h  OK  unreadable\n", text)
+        self.assertIn("  Stellantis (fca)                                  3       2   1        0       0   0        3         1          1   1           0\n", text)
+        self.assertIn("  Kar Korner, Inc.                                  2       0   1        1       1   0        3         1          0   1           1\n", text)
+        self.assertIn("BY DISPATCH REP\n", text)
+        self.assertIn("  Kyle Link               2       0   2        1       1   0        3         1          0   2           0\n", text)
+        self.assertIn("NO GPS PINGS (3)", text)
+        self.assertIn("QUIET FOR MORE THAN 11 H (2)", text)
+        self.assertIn("Kar Korner, Inc. (1)\n  Kyle Link (1)\n    Load 360008  |  In-Route  |  Ocilla, GA -> Medina, OH  |  pickup ETA Fri 11/06 10:00", text)
+        self.assertIn("Stellantis (fca) (1)\n  Kaleb Hamman (1)\n    Load 352243  |  Dispatched  |  Elwood, IL -> Burnsville, MN  |  pickup ETA Fri 11/06 20:00  |  "
+                      "100 Miles Transport LLC, driver Erdenetuvshin Oyunbaatar (224) 284-9908  |  last ping Thu 11/05 14:00 Rockford, IL (19 h ago)"
+                      "  |  sales rep Justice Cromwell", text)
+        self.assertIn("GPS PAGE UNREADABLE (1): 360009", text)
+        self.assertIn("the In-Route loads are scanned for this report only and get no comments or alerts", text)
+        html = email.html
+        self.assertIn("load_id=354745", html)
+        self.assertIn("load_id=360008", html)
+        self.assertIn('<th rowspan="2" style="text-align:left;padding:4px 8px;border-bottom:2px solid #999;vertical-align:bottom">Customer</th>', html)
+        self.assertIn('colspan="3">Dispatched</th>', html)
+        self.assertIn('colspan="3">In-Route</th>', html)
+        self.assertIn('colspan="5">All</th>', html)
+        self.assertIn("<b style=\"color:#b00020\">Thu 11/05 14:00</b> Rockford, IL", html)
+        self.assertIn("<td style=\"padding:4px 8px;border-bottom:1px solid #ddd;vertical-align:top\">In-Route</td>", html)
+        # Merchants left out, mentioned in the intro; a recipient without a name
+        merchants = dict(customer="Merchants Automotive Group Holdings LLC", cons_id="81464")
+        loads2, _w, counts2, _e = checked_loads(build(replace={"352242": merchants}))
+        email = compose_report(loads2, now=NOW, to=["ops@circledelivers.com"], reps=REPS, counts=counts2)
+        self.assertIn("shows 8 Dispatched and 0 In-Route loads with a pickup ETA before 11/08/2026; 1 Merchants Automotive load left out.", email.text)
+        self.assertTrue(email.text.startswith("Hi all,"))
+        # nothing to report: no unreadable column either
+        email = compose_report([l for l in scanned if l.tracking == ACTIVE], now=NOW, to=["kyle.link@circledelivers.com"], reps=REPS)
+        self.assertEqual(email.subject, "GPS tracking report Fri 11/06 09:00: all 3 loads scanned are pinging")
+        self.assertTrue(email.text.startswith("Hi Kyle,"))
+        self.assertIn("NO GPS PINGS (0)", email.text)
+        self.assertNotIn("unreadable", email.text)
+        self.assertEqual(email.load_ids, [])
 
 class RunTests(unittest.TestCase):
     def setUp(self):
@@ -718,12 +840,37 @@ class RunTests(unittest.TestCase):
         # the next run an hour later: every ping is already on its load, every alert is inside the repeat window
         summary2, transport2, poster2 = self.run_once(record=True, post_comments=True, now=NOW + timedelta(hours=1))
         self.assertEqual(poster2.calls, [])
-        self.assertEqual(len(transport2.sent), 0)
+        self.assertEqual([e.key for e, _f in transport2.sent], ["report"])  # 10:00 is a report hour; no alerts
         self.assertEqual(summary2["skipped_repeat"], 6)
         # five hours later the alerts repeat, the comments do not (same last pings)
         summary3, transport3, poster3 = self.run_once(record=True, post_comments=True, now=NOW + timedelta(hours=5))
         self.assertEqual(len(transport3.sent), 6)
         self.assertEqual(poster3.calls, [])
+
+    def test_emails_and_report_go_before_the_comments_with_a_checkpoint_between(self):
+        order = []
+
+        class Poster(FakePoster):
+            def post(self, page_html, comments):
+                order.append("comments")
+                return super().post(page_html, comments)
+
+        class Transport(FakeTransport):
+            def send(self, email, from_addr):
+                order.append("report" if email.key == "report" else "email")
+                return super().send(email, from_addr)
+
+        summary, transport, poster = self.run_once(record=True, post_comments=True, now=NOW.replace(hour=16), transport=Transport(),
+                                                   poster=Poster(), checkpoint=lambda: order.append("checkpoint"))
+        self.assertEqual(order, ["email"] * 6 + ["report", "checkpoint", "comments"])
+        self.assertEqual((summary["comments_written"], len(summary["emails"])), (5, 6))
+        self.assertEqual(sorted(poster.calls[0]), sorted(STALE_AND_ACTIVE_COMMENTS))  # no comment on the pinging In-Route load 360011
+        self.assertEqual(self.state.report["slot"], "2026-11-06 16")
+        # a checkpoint that fails does not stop the comments
+        self.comment_state.entries.clear()
+        summary, _t, poster = self.run_once(record=True, post_comments=True, now=NOW + timedelta(days=1),
+                                            checkpoint=lambda: (_ for _ in ()).throw(RuntimeError("s3 down")))
+        self.assertEqual(len(poster.calls), 1)
 
     def test_comment_failures_are_counted_and_do_not_stop_the_emails(self):
         summary, transport, _p = self.run_once(record=True, post_comments=True, poster=FakePoster(fail=["352242"]))
@@ -773,6 +920,61 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(transport.sent), 5)
         self.assertEqual(summary["send_errors"], ["Kyle Link / Kyle Link: SES down"])
         self.assertNotIn("360001", self.state.sent)
+
+    def test_report_goes_out_at_its_hour_once(self):
+        ten = NOW.replace(hour=10)
+        summary, transport, _p = self.run_once(record=True)
+        self.assertIsNone(summary["report"])  # 09:00 is not a report hour
+        self.assertEqual([e for e, _f in transport.sent if e.key == "report"], [])
+        self.assertEqual(summary["report_loads"], [])  # the In-Route loads were not even looked at
+        summary, transport, _p = self.run_once(record=True, now=ten)
+        reports = [e for e, _f in transport.sent if e.key == "report"]
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0].to, ["justice.cromwell@circledelivers.com"])
+        self.assertEqual((summary["report"]["never"], summary["report"]["quiet"]), (["360008", "360002", "354745"], ["360003", "352243"]))
+        self.assertEqual(summary["report"]["scanned"]["In-Route"], {"scanned": 2, "never": 1, "quiet": 0, "ok": 1, "unknown": 0})
+        self.assertEqual([l["load_id"] for l in summary["report_loads"]], ["360008", "360011"])
+        self.assertEqual(summary["selected"], 9)  # the In-Route loads are not alert loads
+        self.assertNotIn("360008", [lid for e in summary["emails"] for lid in e["loads"]])
+        self.assertNotIn("360008", self.state.sent)
+        self.assertTrue(summary["report"]["sent"])
+        self.assertEqual(self.state.report["slot"], "2026-11-06 10")
+        self.assertEqual(AlertState(self.state.path).report["slot"], "2026-11-06 10")
+        with open(self.sent_log, encoding="utf-8") as handle:
+            entries = [json.loads(line) for line in handle]
+        self.assertEqual([e["subject"] for e in entries if e.get("report")],
+                         ["GPS tracking report Fri 11/06 10:00: 5 of 11 loads with issues (3 with no GPS pings, 2 quiet for more than 11 h)"])
+        # the same hour again (a manual run): not twice
+        summary, transport, _p = self.run_once(record=True, now=ten + timedelta(minutes=20))
+        self.assertIsNone(summary["report"])
+        self.assertEqual([e for e, _f in transport.sent if e.key == "report"], [])
+        # forced: any hour; and a test copy is never recorded
+        summary, transport, _p = self.run_once(record=True, force_report=True, redirect_to=["me@circledelivers.com"])
+        reports = [e for e, _f in transport.sent if e.key == "report"]
+        self.assertEqual(reports[0].to, ["me@circledelivers.com"])
+        self.assertTrue(reports[0].subject.startswith("[Test copy] GPS tracking report"))
+        self.assertFalse(summary["report"]["sent"])
+        self.assertEqual(self.state.report["slot"], "2026-11-06 10")
+        # every run; never; nobody; an --only-rep test run
+        self.assertIsNotNone(self.run_once(report_hours="all")[0]["report"])
+        self.assertIsNone(self.run_once(now=ten, report_hours=())[0]["report"])
+        self.assertIsNone(self.run_once(now=ten, report_to=())[0]["report"])
+        self.assertIsNone(self.run_once(now=ten, only_rep="stellantis")[0]["report"])
+        # the next day's slot sends again; a send failure is logged, not fatal
+        summary, transport, _p = self.run_once(record=True, now=ten + timedelta(days=1))
+        self.assertTrue(summary["report"]["sent"])
+        self.assertEqual(self.state.report["slot"], "2026-11-07 10")
+
+        class Down(FakeTransport):
+            def send(self, email, from_addr):
+                if email.key == "report":
+                    raise RuntimeError("SES down")
+                return super().send(email, from_addr)
+
+        summary, transport, _p = self.run_once(record=True, now=ten + timedelta(days=2), transport=Down())
+        self.assertIsNone(summary["report"])
+        self.assertEqual(summary["send_errors"], ["report: SES down"])
+        self.assertEqual(self.state.report["slot"], "2026-11-07 10")
 
 
 class CliTests(unittest.TestCase):
@@ -863,6 +1065,58 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args[args.index("--exclude-customer") + 1], "")
         args = tracking_update_lambda.alert_args("/w", {"TRACK_EXCLUDE_CUSTOMERS": "81464,Kingbee"})
         self.assertEqual(args[args.index("--exclude-customer") + 1], "81464,Kingbee")
+        # the report: env for the schedule and the recipients, the event to force one now
+        self.assertNotIn("--report-hours", args)  # the code default (10:00 and 16:00 ET, Justice) applies
+        self.assertNotIn("--report", args)
+        args = tracking_update_lambda.alert_args("/w", {"TRACK_REPORT_HOURS": "8,14", "TRACK_REPORT_TO": "a@x.com",
+                                                        "TRACK_REPORT_QUIET_HOURS": "12"}, {"report": True})
+        self.assertEqual(args[args.index("--report-hours") + 1], "8,14")
+        self.assertEqual(args[args.index("--report-to") + 1], "a@x.com")
+        self.assertEqual(args[args.index("--report-quiet-hours") + 1], "12")
+        self.assertIn("--report", args)
+        args = tracking_update_lambda.alert_args("/w", {"TRACK_REPORT_HOURS": "-", "TRACK_REPORT_TO": "-", "TRACK_REPORT_STATUS": "-"}, {"report": "0"})
+        self.assertEqual(args[args.index("--report-hours") + 1], "")
+        self.assertEqual(args[args.index("--report-to") + 1], "")
+        self.assertEqual(args[args.index("--report-status") + 1], "")
+        args = tracking_update_lambda.alert_args("/w", {"TRACK_REPORT_STATUS": "In-Route,Delivered"})
+        self.assertEqual(args[args.index("--report-status") + 1], "In-Route,Delivered")
+        self.assertNotIn("--report", args)
+
+    def test_report_from_the_command_line(self):
+        out = os.path.join(self.tmp, "run.json")
+        self.assertEqual(main(self.common() + ["--report", "--json", out]), 0)
+        with open(out, encoding="utf-8") as handle:
+            data = json.load(handle)
+        self.assertEqual(data["report"]["to"], ["justice.cromwell@circledelivers.com"])
+        self.assertEqual(data["report"]["never"], ["360008", "360002", "354745"])
+        self.assertEqual(data["report"]["scanned"]["All"]["scanned"], 11)
+        self.assertFalse(data["report"]["sent"])
+        self.assertEqual(main(self.common() + ["--report", "--report-status", "", "--json", out]), 0)
+        with open(out, encoding="utf-8") as handle:
+            data = json.load(handle)
+        self.assertEqual(data["report"]["never"], ["360002", "354745"])
+        self.assertEqual(list(data["report"]["scanned"]), ["Dispatched", "All"])
+        files = os.listdir(os.path.join(self.tmp, "outbox"))
+        self.assertEqual(len([f for f in files if f.endswith("_report.txt")]), 1)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "alert_state.json")))
+        # at 10:00 it goes by itself; "never" and an empty --report-to stop it; --report-to changes the recipient
+        ten = ["--now", NOW.replace(hour=10).isoformat()]
+        self.assertEqual(main(self.common() + ten + ["--json", out]), 0)
+        with open(out, encoding="utf-8") as handle:
+            self.assertIsNotNone(json.load(handle)["report"])
+        self.assertEqual(main(self.common() + ten + ["--report-hours", "never", "--json", out]), 0)
+        with open(out, encoding="utf-8") as handle:
+            self.assertIsNone(json.load(handle)["report"])
+        self.assertEqual(main(self.common() + ["--report", "--report-to", "", "--json", out]), 0)
+        with open(out, encoding="utf-8") as handle:
+            self.assertIsNone(json.load(handle)["report"])
+        self.assertEqual(main(self.common() + ["--report", "--report-to", "a@x.com,b@x.com", "--report-quiet-hours", "4", "--json", out]), 0)
+        with open(out, encoding="utf-8") as handle:
+            data = json.load(handle)
+        self.assertEqual(data["report"]["to"], ["a@x.com", "b@x.com"])
+        self.assertEqual(data["report"]["quiet"], ["360001", "360003", "360010", "352243"])
+        with self.assertRaises(SystemExit):
+            main(self.common() + ["--report-hours", "noon"])
 
 
 if __name__ == "__main__":

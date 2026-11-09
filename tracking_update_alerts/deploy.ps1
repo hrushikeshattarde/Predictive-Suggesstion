@@ -50,6 +50,14 @@ param(
     [string]$StellantisTo = "",
     [string]$EscalateTo = "",
     [string]$DefaultManager = "",
+    # The GPS report: the run(s) that send it, by Eastern hour ("10,16" = the 10:00 and 16:00 runs, the user's
+    # choice; "8" once a day; "all" every run; "-" never), who gets it (default: Justice Cromwell) and the quiet
+    # threshold it lists.
+    [string]$ReportHours = "10,16",
+    [string]$ReportTo = "",
+    [int]$ReportQuietHours = 11,
+    # Statuses scanned for the report only (no comments, no alerts); "-" for none.
+    [string]$ReportStatus = "In-Route",
     [int]$DaysAhead = 2,
     [int]$StaleHours = 4,
     [int]$GpsDays = 2,
@@ -203,6 +211,10 @@ if ($ExcludeCustomers) { $vars["TRACK_EXCLUDE_CUSTOMERS"] = $ExcludeCustomers }
 if ($StellantisTo) { $vars["TRACK_STELLANTIS_TO"] = $StellantisTo }
 if ($EscalateTo) { $vars["TRACK_ESCALATE_TO"] = $EscalateTo }
 if ($DefaultManager) { $vars["TRACK_DEFAULT_MANAGER"] = $DefaultManager }
+$vars["TRACK_REPORT_HOURS"] = $ReportHours
+$vars["TRACK_REPORT_QUIET_HOURS"] = [string]$ReportQuietHours
+if ($ReportStatus) { $vars["TRACK_REPORT_STATUS"] = $ReportStatus }
+if ($ReportTo) { $vars["TRACK_REPORT_TO"] = $ReportTo }
 if ($ConfigurationSet) { $vars["SES_CONFIGURATION_SET"] = $ConfigurationSet }
 $envFile = Join-Path $Build "env.json"
 Write-Utf8 $envFile (@{ Variables = $vars } | ConvertTo-Json -Compress)
@@ -255,9 +267,14 @@ if ($Send) { $sendState = "ON via SES as $MailFrom" }
 $commentState = "OFF (planned comments go to the outbox)"
 if ($PostComments) { $commentState = "ON (written into CargoTel)" }
 Write-Host ""
+$reportTo = "Justice Cromwell (default)"
+if ($ReportTo) { $reportTo = $ReportTo }
 Write-Host "done. sending $sendState; comments $commentState; stale after $StaleHours h; GPS window $GpsDays d; repeat after $RepeatHours h; paused $($Paused.IsPresent)"
+Write-Host "report: run hour(s) $ReportHours ET -> $reportTo; lists drivers quiet > $ReportQuietHours h and loads never pinged; also scans $ReportStatus"
 Write-Host "run one pass now:"
 Write-Host "  aws lambda invoke --function-name $FunctionName --invocation-type Event --profile $AwsProfile --region $Region --payload '{}' --cli-binary-format raw-in-base64-out out.json"
+Write-Host "send the report now (any hour; from Git Bash):"
+Write-Host ('  aws lambda invoke --function-name {0} --invocation-type Event --profile {1} --region {2} --cli-binary-format raw-in-base64-out --payload ''{{"report": true}}'' out.json' -f $FunctionName, $AwsProfile, $Region)
 Write-Host "tail the log:"
 Write-Host "  aws logs tail /aws/lambda/$FunctionName --since 30m --follow --profile $AwsProfile --region $Region"
 Write-Host "pause: .\tracking_update_alerts\deploy.ps1 -Paused   (or disable schedule $FunctionName in EventBridge Scheduler)"

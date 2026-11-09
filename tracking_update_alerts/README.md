@@ -76,6 +76,12 @@ one email per group                  Stellantis (customer 62943): per dispatch r
    ▼
 alert_state.json, comment_state.json a load repeats after 4 h (--repeat-hours) while still not pinging, or at once
                                      when its state or owners change; a ping is written as a comment once
+   ▼
+the report (10:00 and 16:00 ET runs) the In-Route loads (--report-status) are selected and GPS-checked too, for
+                                     the report only; scanned / with issues / without issues per status, per
+                                     customer and per dispatch rep; then every load with no GPS pings + every
+                                     driver quiet for more than 11 h (--report-quiet-hours) by customer and
+                                     dispatch rep; To Justice Cromwell (--report-to); once per hour slot
 ```
 
 The comment is the ping as CargoTel prints it plus the place, `2026-11-06 06:12:25-05
@@ -92,6 +98,44 @@ Each email has a plain-text and an HTML part with one section per state ("No GPS
 lane, carrier and driver with the driver's cell, pickup ETA, last GPS ping (time, place,
 how long ago, link to the GPS history), CargoTel's current location, and the last dispatch
 comment.
+
+### The daily report
+
+Asked for on 2026-11-06 (afternoon): a report email to Justice, broken down by customer
+and by dispatch rep, of the loads that were never pinged and the loads whose driver was
+pinging but has not for more than 11 hours. It is a separate email from the alerts (its
+own 11 h threshold, `--report-quiet-hours`; the alerts keep their 4 h one) and is sent by
+the runs whose Eastern hour is in `--report-hours` (default `10,16`: the 10:00 and 16:00 ET
+runs, the user's choice; `8` for one a day, `all` for every run, `never`).
+`alert_state.json` remembers the hour slot it went out in, so a second run in the same
+hour (a manual invoke) does not send it twice; `--report` sends it from any run (pair it
+with `--redirect-to` to look at it first), and on AWS an invoke with the payload
+`{"report": true}` does the same.
+
+Since 2026-11-09 (asked for that morning) the report also covers the **In-Route** loads
+on the same screen (`--report-status`, default `In-Route`): at report hours they are
+selected like the Dispatched ones (same pickup ETA rule, same excluded customers) and
+their GPS history is read, for the report alone. They get no dispatch comments and no
+alerts, and outside report hours they are not even looked at (the screen had 193
+Dispatched and 65 In-Route rows that morning).
+
+The email: a greeting, one line with the screen's numbers (loads per status, the pickup
+ETA cutoff, how many Merchants loads were left out, the 2-day GPS window), then
+**Scanned**: one row per status (Dispatched, In-Route) and a total, with scanned / with
+issues / no GPS pings / quiet more than 11 h / without issues (and unreadable, when any).
+Then **By customer** and **By dispatch rep**: per status the loads scanned, with issues
+and OK, then overall scanned, no pings, quiet and OK, the most issues first, with a total
+row. Then the loads: **No GPS pings** and **Quiet for more than 11 h**, each grouped by
+customer, then by dispatch rep (plain text) or as one table sorted that way (HTML:
+customer, dispatch rep, load with links to the load and its GPS history, status, lane,
+carrier and driver with the driver's cell, pickup ETA, last GPS ping for the quiet ones,
+sales rep, last dispatch comment). "With issues" means no ping at all or a last ping
+older than 11 hours; "OK" means pinged within 11 hours. The subject carries the time, so
+the 10:00 and 16:00 reports tell apart: `GPS tracking report Mon 11/09 10:00: 52 of 224
+loads with issues (41 with no GPS pings, 11 quiet for more than 11 h)`. A run at 15:03 ET on 2026-11-06
+(dry run, nothing sent) made one of 109 loads: 41 never pinged, 11 quiet for more than
+11 h, 57 fine; Kingbee 26, Stellantis 10, Enterprise Utah 5, Kar Korner 5, ...; Victoria
+Storm 20, Juan Bernal 13, Kyle Link 5, ...
 
 ## Running it
 
@@ -115,6 +159,9 @@ python tracking_update_alerts.py --send --redirect-to you@circledelivers.com
 python tracking_update_alerts.py --post-comments --only-load 352242
 python tracking_update_alerts.py --send --redirect-to justice.cromwell@circledelivers.com --only-load 350364,350271,354448,349850
 
+# the report now, to you, nothing recorded (it goes to Justice by itself from the 10:00 and 16:00 ET runs)
+python tracking_update_alerts.py --send --report --redirect-to you@circledelivers.com
+
 # offline, against archived pages (--save-html DIR archives them: DIR/grid_*.html and DIR/gps/gps_<load>.html)
 python tracking_update_alerts.py --from-html pages/grid_20261106-0930.html --gps-dir pages/gps --now 2026-11-06T09:30:00-05:00
 ```
@@ -130,7 +177,9 @@ Switches worth knowing: `--days-ahead` (2), `--stale-hours` (4), `--gps-days` (2
 `--repeat-hours` (4; `0` = every run), `--status` (`Dispatched`), `--stellantis-to`,
 `--escalate-to` (default Justice Cromwell and Stuart Mitchell), `--default-manager`,
 `--only-rep NAME` (`stellantis`, `unassigned` work too), `--only-load ID[,ID]` (the whole run
-limited to those loads), `--max-gps` (400), `--save-html DIR`, `--now ISO`, `--json FILE`.
+limited to those loads), `--max-gps` (400), `--save-html DIR`, `--now ISO`, `--json FILE`;
+for the report `--report-to` (Justice Cromwell), `--report-hours` (`10,16`), `--report-quiet-hours`
+(11), `--report-status` (`In-Route`; `""` for none) and `--report` (send it this run).
 
 ## What was verified (2026-11-06)
 
@@ -186,6 +235,22 @@ limited to those loads), `--max-gps` (400), `--save-html DIR`, `--now ISO`, `--j
 - **Loads with no pickup ETA are not on the screen** (the saved filter excludes them), so
   the job leaves them out too.
 - **Dry runs leave the state alone**; `--redirect-to` test copies are never recorded.
+- **The report goes twice a day, from the 10:00 and 16:00 ET runs**, the user's choice
+  (2026-11-06; it started as once a day at 08:00). `-ReportHours` (deploy) or
+  `--report-hours` changes that; `all` makes it every run.
+- **Emails and the report first, the comment form last.** CargoTel takes minutes to
+  re-render the 280-row screen for the comment POST and again for the check (12 of the
+  Lambda's 15 minutes on 2026-11-06 at 15:12), so the run sends everything first, saves
+  the alert state (on AWS: copies it to S3 at once), and only then posts the comments. A
+  timeout costs the comments only; the next run retries them. Its "quiet" threshold is 11 h as asked, apart from the alerts'
+  4 h, so a driver quiet for 6 h is in the reps' alert but not in the report. Loads
+  quiet for more than 2 days read as "never pinged" (the 48 h window, see above).
+- **The report is sent even when there is nothing to report** ("all N loads scanned are
+  pinging"), so a missing report means the run failed, not that all was well.
+- **In-Route loads are report-only.** They are scanned at report hours only (about 65
+  more GPS pages, a minute), never commented and never alerted; the hourly alerts and
+  comments stay on the Dispatched loads. `-ReportStatus "-"` (deploy) or
+  `--report-status ""` switches the extra scan off.
 
 ## On AWS (live since 2026-11-06 11:01 ET)
 
@@ -208,7 +273,21 @@ checked, 28 pinging (28 comments written, 0 failed), 33 quiet, 52 never pinged, 
 sent (Kaleb, Jack and the no-address dispatch reps' Stellantis loads to stellantisob@; Kyle;
 Victoria; 10 loads with nobody addressable to Justice and Stuart). A run takes about 7.5
 minutes: 2 minutes of GPS pages and 5 minutes for CargoTel to take the comment form and
-re-render the screen. Bucket `circle-reload-suggestions`:
+re-render the screen (523 s by the 15:00 run with 231 rows on the screen; the 15-minute
+timeout is the ceiling). Redeployed at 15:10 ET the same day with the daily report
+(`TRACK_REPORT_HOURS=8`, `TRACK_REPORT_QUIET_HOURS=11`, recipient the code default,
+Justice Cromwell); the first scheduled report is the 08:00 ET run on 2026-11-07. The first
+one went to Justice at 15:24 ET on 2026-11-06 from a manual `{"report": true}` invoke (52
+loads: 41 never pinged, 11 quiet; SES id 010001a1b2885d10-...). That run took 723 s, ten
+minutes of it the comment form: CargoTel re-renders the whole screen (280 rows) on the
+POST and again on the check. Redeployed before the 16:00 run the same day with
+`TRACK_REPORT_HOURS=10,16` (twice a day, the user's choice) and the emails and the report
+moved ahead of the comment phase, with the state checkpointed to S3 in between. Every report
+slot since went out (Fri 16:00, Sat and Sun 10:00 and 16:00); runs took 8 to 11.5 minutes, no
+timeouts. Redeployed 2026-11-09 09:25 ET with the In-Route scan (`TRACK_REPORT_STATUS=In-Route`)
+and the scanned / with issues / without issues counts; a dry run at 09:18 that morning scanned
+158 Dispatched and 62 In-Route loads, 166 with issues after the weekend. Bucket
+`circle-reload-suggestions`:
 
 | Key | What |
 | --- | --- |
@@ -222,6 +301,11 @@ re-render the screen. Bucket `circle-reload-suggestions`:
 Environment variables: `TRACK_BUCKET`, `TRACK_PREFIX`, `TRACK_PAUSED`, `TRACK_SEND`,
 `TRACK_POST_COMMENTS`, `TRACK_DAYS_AHEAD`, `TRACK_STALE_HOURS`, `TRACK_GPS_DAYS`,
 `TRACK_REPEAT_HOURS`, `TRACK_STATUS`, `TRACK_EXCLUDE_CUSTOMERS`, `TRACK_STELLANTIS_TO`, `TRACK_ESCALATE_TO`,
-`TRACK_DEFAULT_MANAGER`, `TRACK_SAVE_PAGES`, `MAIL_FROM`, `SES_CONFIGURATION_SET`, `TZ`.
+`TRACK_DEFAULT_MANAGER`, `TRACK_REPORT_TO`, `TRACK_REPORT_HOURS`, `TRACK_REPORT_QUIET_HOURS`,
+`TRACK_REPORT_STATUS`, `TRACK_SAVE_PAGES`, `MAIL_FROM`, `SES_CONFIGURATION_SET`, `TZ`. The report on demand:
+
+```bash
+aws lambda invoke --function-name circle-tracking-update-alerts --invocation-type Event --profile paybot-admin --region us-east-1 --cli-binary-format raw-in-base64-out --payload '{"report": true}' out.json
+```
 The role may read the cookie object and `config/`, read and write `tracking-alerts/`, and
 send as vehicles@.

@@ -27,11 +27,18 @@ Environment variables::
     TRACK_STELLANTIS_TO     comma-separated addresses for Stellantis alerts (default stellantisob@)
     TRACK_ESCALATE_TO       comma-separated addresses when neither rep can be emailed
     TRACK_DEFAULT_MANAGER   comma-separated Cc for sales reps with no manager in reps.csv
+    TRACK_REPORT_TO         comma-separated addresses for the daily GPS report (default Justice Cromwell; "-" for nobody)
+    TRACK_REPORT_HOURS      Eastern hour(s) whose run sends the report: "10,16" (default), "8", "all", "-" (never)
+    TRACK_REPORT_QUIET_HOURS  the report lists drivers quiet for longer than this (default 11)
+    TRACK_REPORT_STATUS     statuses scanned for the report only, no comments or alerts (default In-Route; "-" for none)
     TRACK_SAVE_PAGES        "1" archives the fetched pages
     TRACK_WORKDIR           scratch folder (default /tmp/tracking-alerts)
     MAIL_FROM               verified SES sender (default the vehicles@ group)
     SES_CONFIGURATION_SET   SES configuration set for bounce/complaint events
     TZ                      America/New_York, so "now" matches CargoTel's clock
+
+An event of ``{"report": true}`` (``aws lambda invoke --payload``) sends the report from
+that run whatever the hour; everything else in the event is ignored.
 """
 
 from __future__ import annotations
@@ -58,7 +65,7 @@ DEFAULT_PREFIX = "tracking-alerts/"
 CONFIG_PREFIX = "config/"
 
 
-def alert_args(work: str, env: Mapping[str, str]) -> list[str]:
+def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | None = None) -> list[str]:
     args = [
         "--reps", os.path.join(work, "config", "reps.csv"),
         "--state", os.path.join(work, "state", "alert_state.json"),
@@ -76,9 +83,15 @@ def alert_args(work: str, env: Mapping[str, str]) -> list[str]:
                          ("--configuration-set", "SES_CONFIGURATION_SET")):
         if env.get(name):
             args += [option, env[name]]
-    if env.get("TRACK_EXCLUDE_CUSTOMERS"):
-        # "-" switches the default exclusion off (an empty Lambda variable reads as unset).
-        args += ["--exclude-customer", "" if env["TRACK_EXCLUDE_CUSTOMERS"].strip() == "-" else env["TRACK_EXCLUDE_CUSTOMERS"]]
+    # "-" switches a default off (an empty Lambda variable reads as unset).
+    for option, name in (("--exclude-customer", "TRACK_EXCLUDE_CUSTOMERS"), ("--report-to", "TRACK_REPORT_TO"),
+                         ("--report-hours", "TRACK_REPORT_HOURS"), ("--report-status", "TRACK_REPORT_STATUS")):
+        if env.get(name):
+            args += [option, "" if env[name].strip() == "-" else env[name]]
+    if env.get("TRACK_REPORT_QUIET_HOURS"):
+        args += ["--report-quiet-hours", env["TRACK_REPORT_QUIET_HOURS"]]
+    if isinstance(event, Mapping) and str(event.get("report", "")).strip().lower() in ("1", "true", "yes", "on"):
+        args.append("--report")
     if flag(env, "TRACK_SEND"):
         args.append("--send")
     if flag(env, "TRACK_POST_COMMENTS"):
@@ -115,8 +128,15 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
 
     result: dict[str, Any] = {"bucket": bucket, "prefix": prefix, "down": down, "send": flag(env, "TRACK_SEND"),
                               "post_comments": flag(env, "TRACK_POST_COMMENTS")}
+    def checkpoint() -> None:
+        # The emails are out and the alert state is saved: copy it up now, so a timeout in the
+        # comment phase (the slow part; the Lambda is killed and ``finally`` never runs) cannot
+        # lose it and repeat the alerts next hour.
+        n = sync_up(bucket, prefix + "state/", os.path.join(work, "state"), changed_since=started - 1, client=client)
+        log(f"checkpoint: state={n} to s3://{bucket}/{prefix}state/")
+
     try:
-        result["rc"] = tracking_update_alerts.main(alert_args(work, env))
+        result["rc"] = tracking_update_alerts.main(alert_args(work, env, event), checkpoint=checkpoint)
     finally:
         up = {folder: sync_up(bucket, prefix + folder + "/", os.path.join(work, folder), changed_since=started - 1, client=client)
               for folder in ("state", "outbox", "pages")}
