@@ -50,11 +50,11 @@ param(
     [string]$StellantisTo = "",
     [string]$EscalateTo = "",
     [string]$DefaultManager = "",
-    # The GPS report: the run(s) that send it, by Eastern hour ("10,16" = the 10:00 and 16:00 runs, the user's
+    # The GPS report: the run(s) that send it, by Eastern hour ("7,11,15,18" = the 07:00, 11:00, 15:00 and 18:00 runs, the user's
     # choice; "8" once a day; "all" every run; "-" never), who gets it (default: Justice Cromwell, stellantisob@,
     # Brett Booth, Podge Ormsby and Mitchell Meyers, the code's list) and the quiet
     # threshold it lists.
-    [string]$ReportHours = "10,16",
+    [string]$ReportHours = "7,11,15,18",
     [string]$ReportTo = "",
     [int]$ReportQuietHours = 11,
     # Statuses scanned for the report only (no comments, no alerts); "-" for none.

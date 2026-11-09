@@ -41,7 +41,7 @@ What it does, once per run:
    stays stale, or at once when its state or owners change; a ping is written as a
    comment once. Dry runs (no ``--send`` / ``--post-comments``) write the emails and the
    comments to ``outbox/`` and leave the state alone.
-6. Twice a day (the 10:00 and 16:00 ET runs; ``--report-hours``) send the operations
+6. Four times a day (07:00, 11:00, 15:00, 18:00 ET; ``--report-hours``) send the operations
    manager a report of the whole screen, the Dispatched loads above plus the In-Route
    ones (``--report-status``), which are GPS-checked for the report only (no comments,
    no alerts): how many loads were scanned with and without issues per status, per
@@ -149,7 +149,8 @@ DEFAULT_EXCLUDE_CUSTOMERS = ("81464", "Merchants Automotive")
 #: The daily report for the operations manager (user's request, 2026-11-06): every load
 #: with no GPS pings and every driver quiet for longer than DEFAULT_REPORT_QUIET_HOURS,
 #: by customer and dispatch rep. Sent by the run(s) whose Eastern hour is listed in
-#: DEFAULT_REPORT_HOURS ("all" = every run), once per hour slot. 10:00 and 16:00 ET: the user's choice.
+#: DEFAULT_REPORT_HOURS ("all" = every run), once per hour slot. 07:00, 11:00, 15:00 and 18:00 ET: the
+#: user's choice (2026-11-09; 10:00 and 16:00 earlier that day, 08:00 before).
 #: Justice Cromwell, the Stellantis mailbox, Brett Booth, Podge Ormsby and Mitchell Meyers
 #: (the user's list, 2026-11-09 13:35 ET; Justice alone before that).
 DEFAULT_REPORT_TO = (
@@ -159,7 +160,7 @@ DEFAULT_REPORT_TO = (
     "pormsby@circledelivers.com",
     "mitchell.meyers@circledelivers.com",
 )
-DEFAULT_REPORT_HOURS: tuple[int, ...] | str = (10, 16)
+DEFAULT_REPORT_HOURS: tuple[int, ...] | str = (7, 11, 15, 18)
 DEFAULT_REPORT_QUIET_HOURS = 11.0
 #: Statuses scanned for the report only (no comments, no alerts): the In-Route loads on
 #: the same screen, asked for on 2026-11-09.
@@ -1902,7 +1903,7 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
                         help="who gets the GPS report (default Justice Cromwell, the Stellantis mailbox, Brett Booth, Podge Ormsby and Mitchell Meyers; "
                              "\"\" for nobody)")
     parser.add_argument("--report-hours", default="all" if DEFAULT_REPORT_HOURS == "all" else ",".join(str(h) for h in DEFAULT_REPORT_HOURS),
-                        metavar="H[,H]|all|never", help="the run(s) that send the report, by hour of day (default 10,16: the 10:00 and 16:00 ET runs)")
+                        metavar="H[,H]|all|never", help="the run(s) that send the report, by hour of day (default 7,11,15,18: the 07:00, 11:00, 15:00 and 18:00 ET runs)")
     parser.add_argument("--report-quiet-hours", type=float, default=DEFAULT_REPORT_QUIET_HOURS,
                         help="the report lists the drivers quiet for longer than this (default 11)")
     parser.add_argument("--report-status", default=",".join(DEFAULT_REPORT_STATUSES), metavar="STATUS[,...]",

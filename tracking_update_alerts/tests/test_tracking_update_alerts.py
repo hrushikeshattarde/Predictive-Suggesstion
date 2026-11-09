@@ -849,7 +849,7 @@ class RunTests(unittest.TestCase):
         # the next run an hour later: every ping is already on its load, every alert is inside the repeat window
         summary2, transport2, poster2 = self.run_once(record=True, post_comments=True, now=NOW + timedelta(hours=1))
         self.assertEqual(poster2.calls, [])
-        self.assertEqual([e.key for e, _f in transport2.sent], ["report"])  # 10:00 is a report hour; no alerts
+        self.assertEqual([e.key for e, _f in transport2.sent], [])  # 10:00 is not a report hour either
         self.assertEqual(summary2["skipped_repeat"], 6)
         # five hours later the alerts repeat, the comments do not (same last pings)
         summary3, transport3, poster3 = self.run_once(record=True, post_comments=True, now=NOW + timedelta(hours=5))
@@ -869,12 +869,12 @@ class RunTests(unittest.TestCase):
                 order.append("report" if email.key == "report" else "email")
                 return super().send(email, from_addr)
 
-        summary, transport, poster = self.run_once(record=True, post_comments=True, now=NOW.replace(hour=16), transport=Transport(),
+        summary, transport, poster = self.run_once(record=True, post_comments=True, now=NOW.replace(hour=15), transport=Transport(),
                                                    poster=Poster(), checkpoint=lambda: order.append("checkpoint"))
         self.assertEqual(order, ["email"] * 6 + ["report", "checkpoint", "comments"])
         self.assertEqual((summary["comments_written"], len(summary["emails"])), (5, 6))
         self.assertEqual(sorted(poster.calls[0]), sorted(STALE_AND_ACTIVE_COMMENTS))  # no comment on the pinging In-Route load 360011
-        self.assertEqual(self.state.report["slot"], "2026-11-06 16")
+        self.assertEqual(self.state.report["slot"], "2026-11-06 15")
         # a checkpoint that fails does not stop the comments
         self.comment_state.entries.clear()
         summary, _t, poster = self.run_once(record=True, post_comments=True, now=NOW + timedelta(days=1),
@@ -931,12 +931,12 @@ class RunTests(unittest.TestCase):
         self.assertNotIn("360001", self.state.sent)
 
     def test_report_goes_out_at_its_hour_once(self):
-        ten = NOW.replace(hour=10)
+        eleven = NOW.replace(hour=11)
         summary, transport, _p = self.run_once(record=True)
         self.assertIsNone(summary["report"])  # 09:00 is not a report hour
         self.assertEqual([e for e, _f in transport.sent if e.key == "report"], [])
         self.assertEqual(summary["report_loads"], [])  # the In-Route loads were not even looked at
-        summary, transport, _p = self.run_once(record=True, now=ten)
+        summary, transport, _p = self.run_once(record=True, now=eleven)
         reports = [e for e, _f in transport.sent if e.key == "report"]
         self.assertEqual(len(reports), 1)
         self.assertEqual(reports[0].to, list(DEFAULT_REPORT_TO))
@@ -947,14 +947,14 @@ class RunTests(unittest.TestCase):
         self.assertNotIn("360008", [lid for e in summary["emails"] for lid in e["loads"]])
         self.assertNotIn("360008", self.state.sent)
         self.assertTrue(summary["report"]["sent"])
-        self.assertEqual(self.state.report["slot"], "2026-11-06 10")
-        self.assertEqual(AlertState(self.state.path).report["slot"], "2026-11-06 10")
+        self.assertEqual(self.state.report["slot"], "2026-11-06 11")
+        self.assertEqual(AlertState(self.state.path).report["slot"], "2026-11-06 11")
         with open(self.sent_log, encoding="utf-8") as handle:
             entries = [json.loads(line) for line in handle]
         self.assertEqual([e["subject"] for e in entries if e.get("report")],
-                         ["GPS tracking report Fri 11/06 10:00: 5 of 11 loads with issues (3 with no GPS pings, 2 quiet for more than 11 h)"])
+                         ["GPS tracking report Fri 11/06 11:00: 5 of 11 loads with issues (3 with no GPS pings, 2 quiet for more than 11 h)"])
         # the same hour again (a manual run): not twice
-        summary, transport, _p = self.run_once(record=True, now=ten + timedelta(minutes=20))
+        summary, transport, _p = self.run_once(record=True, now=eleven + timedelta(minutes=20))
         self.assertIsNone(summary["report"])
         self.assertEqual([e for e, _f in transport.sent if e.key == "report"], [])
         # forced: any hour; and a test copy is never recorded
@@ -963,16 +963,16 @@ class RunTests(unittest.TestCase):
         self.assertEqual(reports[0].to, ["me@circledelivers.com"])
         self.assertTrue(reports[0].subject.startswith("[Test copy] GPS tracking report"))
         self.assertFalse(summary["report"]["sent"])
-        self.assertEqual(self.state.report["slot"], "2026-11-06 10")
+        self.assertEqual(self.state.report["slot"], "2026-11-06 11")
         # every run; never; nobody; an --only-rep test run
         self.assertIsNotNone(self.run_once(report_hours="all")[0]["report"])
-        self.assertIsNone(self.run_once(now=ten, report_hours=())[0]["report"])
-        self.assertIsNone(self.run_once(now=ten, report_to=())[0]["report"])
-        self.assertIsNone(self.run_once(now=ten, only_rep="stellantis")[0]["report"])
+        self.assertIsNone(self.run_once(now=eleven, report_hours=())[0]["report"])
+        self.assertIsNone(self.run_once(now=eleven, report_to=())[0]["report"])
+        self.assertIsNone(self.run_once(now=eleven, only_rep="stellantis")[0]["report"])
         # the next day's slot sends again; a send failure is logged, not fatal
-        summary, transport, _p = self.run_once(record=True, now=ten + timedelta(days=1))
+        summary, transport, _p = self.run_once(record=True, now=eleven + timedelta(days=1))
         self.assertTrue(summary["report"]["sent"])
-        self.assertEqual(self.state.report["slot"], "2026-11-07 10")
+        self.assertEqual(self.state.report["slot"], "2026-11-07 11")
 
         class Down(FakeTransport):
             def send(self, email, from_addr):
@@ -980,10 +980,10 @@ class RunTests(unittest.TestCase):
                     raise RuntimeError("SES down")
                 return super().send(email, from_addr)
 
-        summary, transport, _p = self.run_once(record=True, now=ten + timedelta(days=2), transport=Down())
+        summary, transport, _p = self.run_once(record=True, now=eleven + timedelta(days=2), transport=Down())
         self.assertIsNone(summary["report"])
         self.assertEqual(summary["send_errors"], ["report: SES down"])
-        self.assertEqual(self.state.report["slot"], "2026-11-07 10")
+        self.assertEqual(self.state.report["slot"], "2026-11-07 11")
 
 
 class CliTests(unittest.TestCase):
@@ -1075,7 +1075,7 @@ class CliTests(unittest.TestCase):
         args = tracking_update_lambda.alert_args("/w", {"TRACK_EXCLUDE_CUSTOMERS": "81464,Kingbee"})
         self.assertEqual(args[args.index("--exclude-customer") + 1], "81464,Kingbee")
         # the report: env for the schedule and the recipients, the event to force one now
-        self.assertNotIn("--report-hours", args)  # the code default (10:00 and 16:00 ET, Justice) applies
+        self.assertNotIn("--report-hours", args)  # the code default (07:00, 11:00, 15:00 and 18:00 ET) applies
         self.assertNotIn("--report", args)
         args = tracking_update_lambda.alert_args("/w", {"TRACK_REPORT_HOURS": "8,14", "TRACK_REPORT_TO": "a@x.com",
                                                         "TRACK_REPORT_QUIET_HOURS": "12"}, {"report": True})
@@ -1106,14 +1106,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(data["report"]["never"], ["360002", "354745"])
         self.assertEqual(list(data["report"]["scanned"]), ["Dispatched", "All"])
         files = os.listdir(os.path.join(self.tmp, "outbox"))
-        self.assertEqual(len([f for f in files if f.endswith("_report.txt")]), 1)
+        self.assertEqual(len([f for f in files if "_report" in f]), 2)  # one per forced run above
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "alert_state.json")))
-        # at 10:00 it goes by itself; "never" and an empty --report-to stop it; --report-to changes the recipient
-        ten = ["--now", NOW.replace(hour=10).isoformat()]
-        self.assertEqual(main(self.common() + ten + ["--json", out]), 0)
+        # at 11:00 it goes by itself; "never" and an empty --report-to stop it; --report-to changes the recipient
+        eleven = ["--now", NOW.replace(hour=11).isoformat()]
+        self.assertEqual(main(self.common() + eleven + ["--json", out]), 0)
         with open(out, encoding="utf-8") as handle:
             self.assertIsNotNone(json.load(handle)["report"])
-        self.assertEqual(main(self.common() + ten + ["--report-hours", "never", "--json", out]), 0)
+        self.assertEqual(main(self.common() + eleven + ["--report-hours", "never", "--json", out]), 0)
         with open(out, encoding="utf-8") as handle:
             self.assertIsNone(json.load(handle)["report"])
         self.assertEqual(main(self.common() + ["--report", "--report-to", "", "--json", out]), 0)

@@ -29,7 +29,7 @@ Environment variables::
     TRACK_DEFAULT_MANAGER   comma-separated Cc for sales reps with no manager in reps.csv
     TRACK_REPORT_TO         comma-separated addresses for the GPS report (default Justice, stellantisob@, Brett Booth, Podge Ormsby,
                             Mitchell Meyers; "-" for nobody)
-    TRACK_REPORT_HOURS      Eastern hour(s) whose run sends the report: "10,16" (default), "8", "all", "-" (never)
+    TRACK_REPORT_HOURS      Eastern hour(s) whose run sends the report: "7,11,15,18" (default), "8", "all", "-" (never)
     TRACK_REPORT_QUIET_HOURS  the report lists drivers quiet for longer than this (default 11)
     TRACK_REPORT_STATUS     statuses scanned for the report only, no comments or alerts (default In-Route; "-" for none)
     TRACK_SAVE_PAGES        "1" archives the fetched pages
