@@ -33,10 +33,11 @@ param(
     [string]$Prefix = "sales-rep-sync/",
     [string]$CookieBucket = "circle-bot-cookies",
     [string]$CookieKey = "rubicon/cargotel.json",
-    # Every two hours (the user's choice, 2026-11-09) at :30 from 06:30 to 20:30 Eastern, seven
-    # days a week: half an hour after the tracking-update alerts (which run on the hour) so the
-    # two never post to CargoTel at once, and before the other jobs look for a load's sales rep.
-    [string]$Schedule = "cron(30 6-20/2 * * ? *)",
+    # Every 30 minutes (the user's choice, 2026-11-10) at :20 and :50 from 06:20 to 21:50 Eastern,
+    # seven days a week. The tracking-update alerts post to CargoTel from :00 and their Lambda
+    # stops at 15 minutes, so :20 clears every tracking run that is not timed out and retried.
+    # A pass takes 1 to 90 seconds.
+    [string]$Schedule = "cron(20/30 6-21 * * ? *)",
     [string]$ScheduleTimezone = "America/New_York",
     [int]$MaxChanges = 200,
     [int]$MemoryMb = 1024,
@@ -206,7 +207,7 @@ $targetFile = Join-Path $Build "target.json"
 Write-Utf8 $targetFile (@{ Arn = $functionArn; RoleArn = $schedRoleArn; Input = "{}"; RetryPolicy = @{ MaximumRetryAttempts = 0 } } | ConvertTo-Json -Compress)
 $schedArgs = @("--name", $FunctionName, "--schedule-expression", $Schedule, "--schedule-expression-timezone", $ScheduleTimezone,
                "--flexible-time-window", "Mode=OFF", "--target", "file://$targetFile",
-               "--description", "Runs the sales rep sync (Bot Pipelines > Sales Rep Edit) every two hours at :30 from 06:30 to 20:30 Eastern")
+               "--description", "Runs the sales rep sync (Bot Pipelines > Sales Rep Edit) every 30 minutes at :20 and :50 from 06:20 to 21:50 Eastern")
 $existing = (Invoke-Aws scheduler list-schedules --name-prefix $FunctionName --query "Schedules[?Name=='$FunctionName'].Name" --output text).Trim()
 if ($existing -eq $FunctionName) {
     Invoke-Aws scheduler update-schedule @schedArgs | Out-Null

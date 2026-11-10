@@ -8,7 +8,7 @@ Rep (Bulk)" widget.
 Why: CargoTel keeps a default rep per customer but does not copy it onto new loads, so
 loads arrive with no Sales Rep 1. Every job in this repo that emails or Cc's the sales rep
 (reload suggestions, due-date alerts, pickup-ETA alerts, tracking-update alerts) holds
-such loads. With the rep filled in within two hours, they flow.
+such loads. With the rep filled in within half an hour, they flow.
 
 ## What one run does
 
@@ -100,10 +100,11 @@ its roles (cookie read, own prefix read/write; no SES) and the EventBridge sched
 .\sales_rep_sync\deploy.ps1 -Paused    # kill switch
 ```
 
-Schedule: `cron(30 6-20/2 * * ? *)` America/New_York, every two hours at :30 from 06:30 to
-20:30, seven days a week (the two-hour cadence is the user's choice of 2026-11-09; the :30
-offset keeps it half an hour after the tracking-update alerts, which post to CargoTel on the
-hour, and ahead of the other jobs that look for a load's sales rep). Environment:
+Schedule: `cron(20/30 6-21 * * ? *)` America/New_York, every 30 minutes at :20 and :50 from
+06:20 to 21:50, seven days a week (the 30-minute cadence is the user's choice of 2026-11-10;
+it ran every two hours at :30 before). The tracking-update alerts post to CargoTel from :00
+and their Lambda stops at 15 minutes, so :20 clears every tracking run unless one times out
+and Lambda retries it. A pass takes 1 to 90 seconds. Environment:
 `SRS_APPLY`, `SRS_OVERWRITE`, `SRS_MAX_CHANGES`, `SRS_SAVE_PAGES`, `SRS_PAUSED`,
 `SRS_BUCKET`, `SRS_PREFIX`, `TZ`. A manual invoke accepts `{"dry_run": true}` and
 `{"only_load": "354657"}`.
