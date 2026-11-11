@@ -245,6 +245,10 @@ if (-not (Test-FunctionExists)) {
 }
 # Never two runs at once: they would race on the state files.
 Invoke-Aws lambda put-function-concurrency --function-name $FunctionName --reserved-concurrent-executions 1 | Out-Null
+# No async retries: Lambda's default (2) re-ran a timed-out 11:00 run at 11:16 and 11:33 on 2026-11-10, three
+# full-screen comment POSTs in 45 minutes and into the sales rep sync's :20 slot. The next hourly run picks up
+# whatever a failed run missed (the comments; the report slot is saved before them).
+Invoke-Aws lambda put-function-event-invoke-config --function-name $FunctionName --maximum-retry-attempts 0 | Out-Null
 $functionArn = (Invoke-Aws lambda get-function --function-name $FunctionName --query Configuration.FunctionArn --output text).Trim()
 
 # ---------------------------------------------------------------- schedule

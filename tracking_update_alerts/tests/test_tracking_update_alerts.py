@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FOLDER = os.path.dirname(HERE)
@@ -35,6 +36,7 @@ from tracking_update_alerts import (  # noqa: E402
     build_comment_post,
     check_gps,
     classify,
+    comment_boxes,
     comment_text,
     compose,
     compose_report,
@@ -61,6 +63,7 @@ from tracking_update_alerts import (  # noqa: E402
     select_loads,
     verify_comments,
 )
+import tracking_update_alerts  # noqa: E402
 import tracking_update_lambda  # noqa: E402
 
 EST = timezone(timedelta(hours=-5))
@@ -518,6 +521,53 @@ class CommentTests(unittest.TestCase):
         page = build(replace={"352242": dict(comment=("2026-11-06 09:01 EST", "RUBICON BOT", "2026-11-06 06:12:25-05\tOak Lawn, IL"))})
         result = verify_comments(parse_grid(page), {"352242": "2026-11-06 06:12:25-05 Oak Lawn, IL", "352243": "nope", "999": "x"})
         self.assertEqual(result, {"352242": True, "352243": False, "999": False})
+
+    def test_comment_poster_posts_only_the_commented_rows(self):
+        all_ids = [lid for _title, ids in LAYOUT for lid in ids]
+        comments = {"360001": "2026-11-06 04:30:00-05 Columbia, MO", "352242": "2026-11-06 06:12:25-05 Oak Lawn, IL", "999999": "left the screen"}
+        landed = {"352242": dict(comment=("2026-11-06 09:01 EST", "RUBICON BOT", "2026-11-06 06:12:25-05\tOak Lawn, IL"))}
+        posts, logs = [], []
+
+        class Session:
+            specs = []
+
+            def fetch_search_html(self, spec):
+                self.specs.append(spec)
+                wanted = spec.extra.get(tracking_update_alerts.COMMENT_FILTER, "").split("\n")
+                return 200, build(without=[l for l in all_ids if l not in wanted], replace=landed if posts else None), {}
+
+        def fake_post(session, url, data, timeout=300.0):
+            posts.append(data)
+            return 200, "<html>re-rendered</html>"
+
+        session = Session()
+        poster = tracking_update_alerts.CommentPoster(session, NOW, log=logs.append)
+        with mock.patch.object(tracking_update_alerts, "session_post", fake_post):
+            result = poster.post(PAGE, comments)
+        filters = [spec.extra[tracking_update_alerts.COMMENT_FILTER] for spec in session.specs]
+        self.assertEqual(filters, ["352242\n360001\n999999", "352242\n360001"])  # the screen read and the check, both narrowed
+        self.assertEqual(len(posts), 1)
+        boxes = {n: v for n, v in posts[0] if n.startswith("Control__DispatchCmt_ID__") and n.endswith("__comment")}
+        self.assertEqual(boxes, {"Control__DispatchCmt_ID__352242__comment": comments["352242"],
+                                 "Control__DispatchCmt_ID__360001__comment": comments["360001"]})  # two rows posted, not fourteen
+        self.assertEqual(posts[0][-1], ("Menu__is_submitted", "Submit"))
+        self.assertEqual(result, {"352242": True, "360001": False})
+        self.assertTrue(any("999999" in m and "no longer on the screen" in m for m in logs))
+
+    def test_comment_poster_skips_the_post_when_every_load_left(self):
+        posts = []
+
+        class Session:
+            def fetch_search_html(self, spec):
+                return 200, build(without=[lid for _title, ids in LAYOUT for lid in ids]), {}
+
+        with mock.patch.object(tracking_update_alerts, "session_post", lambda *a, **k: posts.append(a) or (200, "")):
+            result = tracking_update_alerts.CommentPoster(Session(), NOW).post(PAGE, {"999999": "x"})
+        self.assertEqual((result, posts), ({}, []))
+
+    def test_comment_boxes(self):
+        self.assertEqual(sorted(comment_boxes(build(without=["352243"])))[:2], ["352242", "354745"])
+        self.assertEqual(comment_boxes(build(form=False)), [])
 
     def test_comment_state_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:

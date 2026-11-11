@@ -51,8 +51,12 @@ What it does, once per run:
    look first).
 
 Within a run the emails and the report go out first and the alert state is saved (and,
-on AWS, checkpointed to S3); the comment form is posted last, because CargoTel takes
-minutes to re-render the screen for it and a timeout there must cost the comments only.
+on AWS, checkpointed to S3); the comment form is posted last, so a timeout there costs
+the comments only. CargoTel re-saves every row of the form it is sent (about two seconds
+a row: the whole 320-row screen took over ten minutes and timed the Lambda out on
+2026-11-10), so the comments are posted from the screen re-read with its "CargoTel IDs"
+filter set to just the loads being commented: still the page's whole ``Menu_alt`` form,
+only a few dozen rows long.
 
 ``--no-alerts`` (``TRACK_ALERTS=0``) switches the hourly emails to the reps off while the
 comments and the report carry on (the user's choice from 2026-11-09 14:35 ET).
@@ -78,6 +82,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -116,7 +121,7 @@ from suggest_reloads import nice_name  # noqa: E402
 __all__ = [
     "ACTIVE", "NEVER", "STALE", "UNKNOWN",
     "AlertState", "CommentState", "GpsLoad", "MailGroup", "OutboxTransport", "Ping",
-    "build_comment_post", "check_gps", "classify", "comment_text", "compose", "compose_report", "customer_excluded", "eta_cutoff",
+    "build_comment_post", "check_gps", "classify", "comment_boxes", "comment_text", "compose", "compose_report", "customer_excluded", "eta_cutoff",
     "form_fields", "gps_params", "grid_params", "load_from_row", "mail_groups", "main", "needs_comment", "nice_place",
     "parse_ping_stamp", "parse_pings", "parse_report_hours", "parse_stamp", "plan_comments", "report_breakdowns", "report_bucket", "report_due",
     "report_loads", "run_once", "select_loads", "verify_comments",
@@ -173,6 +178,11 @@ DEFAULT_REPORT_STATUSES = ("In-Route",)
 #: Stellantis load); ``original_consignor`` and ``cons_id`` carry the real customer.
 EXTRA_VIEW_FIELDS = ("sales_rep1", "sales_rep2", "original_consignor", "cons_id", "consignor")
 REQUIRED_COLUMNS = ("pickiup_eta_datetime", "GPSLink", "DispatchCmt_IDLastCmt", "dispatch_rep", "status")
+#: The screen's "CargoTel IDs" filter (a textarea, one load id per line). Sent on the GET it
+#: narrows the saved search to those loads, and the page's Menu_alt form shrinks with it
+#: (3 loads: 177 fields instead of 4,271 for the 318-row screen, 2026-11-10); the form
+#: echoes it back, so the comment POST re-saves and re-renders those rows only.
+COMMENT_FILTER = "Menu__Load_Id"
 UNASSIGNED = ""
 
 ACTIVE = "active"
@@ -670,18 +680,33 @@ def form_fields(form_html: str) -> list[tuple[str, str]]:
     return out
 
 
+_BOX_RE = re.compile(r'name="Control__DispatchCmt_ID__(\d+)__comment"', re.I)
+
+
+def _menu_alt_form(page_html: str) -> str | None:
+    match = re.search(r'<form\s+name="Menu_alt"', page_html, re.I)
+    if not match:
+        return None
+    end = re.compile(r"</form\s*>", re.I).search(page_html, match.start())
+    return page_html[match.start():end.start() if end else len(page_html)]
+
+
+def comment_boxes(page_html: str) -> list[str]:
+    """The load ids with a "Dispatch Comment (Add)" box in the page's Menu_alt form."""
+
+    form = _menu_alt_form(page_html)
+    return _BOX_RE.findall(form) if form else []
+
+
 def build_comment_post(page_html: str, comments: dict[str, str]) -> list[tuple[str, str]]:
     """The POST body that adds ``comments`` (``{load_id: text}``) through the grid's own
     form: the ``Menu_alt`` form of the fetched page, every field as the browser would
     send it, with the "Dispatch Comment (Add)" box of each load filled in and the Submit
     button pressed. Raises when the page has no such form or a load has no box."""
 
-    match = re.search(r'<form\s+name="Menu_alt"', page_html, re.I)
-    if not match:
+    form = _menu_alt_form(page_html)
+    if form is None:
         raise RuntimeError("no Menu_alt form on the page; cannot add dispatch comments")
-    start = match.start()
-    end = re.compile(r"</form\s*>", re.I).search(page_html, start)
-    form = page_html[start:end.start() if end else len(page_html)]
     boxes = {f"Control__DispatchCmt_ID__{load_id}__comment": text for load_id, text in comments.items()}
     data: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -1601,11 +1626,15 @@ def grid_params(now: datetime, days_ahead: int = DEFAULT_DAYS_AHEAD) -> dict[str
 
 
 def fetch_grid_html(session: CargoTelSession, now: datetime, *, saved_id: str = SEARCH_ID, days_ahead: int = DEFAULT_DAYS_AHEAD,
-                    save_html: str | None = None) -> tuple[str, Grid]:
-    """The screen with every row, the extra columns and the Pickup ETA filter dropped.
-    Returns the page (needed again for the comment form) and the parsed grid."""
+                    save_html: str | None = None, load_ids: list[str] | None = None) -> tuple[str, Grid]:
+    """The screen with every row, the extra columns and the Pickup ETA filter dropped;
+    with ``load_ids``, only those loads (the screen's "CargoTel IDs" filter, for the
+    comment form). Returns the page and the parsed grid."""
 
-    spec = SearchParams(saved_id, per_page="All", extra=grid_params(now, days_ahead))  # type: ignore[arg-type]
+    extra = grid_params(now, days_ahead)
+    if load_ids:
+        extra[COMMENT_FILTER] = "\n".join(load_ids)
+    spec = SearchParams(saved_id, per_page="All", extra=extra)  # type: ignore[arg-type]
     status, html, _params = session.fetch_search_html(spec)
     if save_html:
         os.makedirs(save_html, exist_ok=True)
@@ -1621,27 +1650,56 @@ def fetch_grid_html(session: CargoTelSession, now: datetime, *, saved_id: str = 
 
 class CommentPoster:
     """Adds dispatch comments through the grid form and checks them on a re-fetched
-    grid. ``post(page_html, comments)`` -> ``{load_id: landed}``."""
+    grid. ``post(page_html, comments)`` -> ``{load_id: landed}``.
+
+    ``page_html`` (the whole screen the run read) is NOT what gets posted: CargoTel
+    re-saves every row of the form it receives, about two seconds a row, and the 320-row
+    form ran past the Lambda's 900 s on 2026-11-10. The screen is read again with the
+    "CargoTel IDs" filter (:data:`COMMENT_FILTER`) set to the loads being commented, and
+    that page's whole Menu_alt form is posted (a trimmed form saves nothing; a narrower
+    screen is still a whole form). The check re-reads the same narrow screen. Loads that
+    left the screen since the run read it are logged and left for the next run."""
 
     def __init__(self, session: CargoTelSession, now: datetime, *, saved_id: str = SEARCH_ID,
-                 days_ahead: int = DEFAULT_DAYS_AHEAD) -> None:
+                 days_ahead: int = DEFAULT_DAYS_AHEAD, log: Callable[[str], None] = lambda m: None) -> None:
         self.session = session
         self.now = now
         self.saved_id = saved_id
         self.days_ahead = days_ahead
+        self.log = log
+
+    def _fetch(self, load_ids: list[str]) -> tuple[str, Grid]:
+        return fetch_grid_html(self.session, self.now, saved_id=self.saved_id, days_ahead=self.days_ahead, load_ids=load_ids)
 
     def post(self, page_html: str, comments: dict[str, str]) -> dict[str, bool]:
-        data = build_comment_post(page_html, comments)
+        started = time.monotonic()
+        ids = sorted(comments)
+        small_html, small = self._fetch(ids)
+        on_screen = set(comment_boxes(small_html))
+        others = len({r.load_id for r in small.rows if r.load_id} - set(ids))
+        if others:
+            self.log(f"comment form: the {COMMENT_FILTER} filter brought {others} other load(s) along ({len(small.rows)} rows); posting them unchanged")
+        gone = [load_id for load_id in ids if load_id not in on_screen]
+        if gone:
+            self.log(f"comment form: {len(gone)} load(s) no longer on the screen, left for the next run: {', '.join(gone)}")
+        wanted = {load_id: comments[load_id] for load_id in ids if load_id in on_screen}
+        if not wanted:
+            return {}
+        data = build_comment_post(small_html, wanted)
+        fetched = time.monotonic()
         url = f"{SEARCH_URL}?expand_saved={self.saved_id}&expand_saved_type=priv&Menu__perPage=All"
         status, html = session_post(self.session, url, data)
+        posted = time.monotonic()
         if status != 200:
             raise RuntimeError(f"CargoTel answered HTTP {status} to the comment form")
         text = _TAG_RE.sub(" ", html)
         error = re.search(r"An Error was encountered.{0,300}", text, re.S)
         if error:
             raise RuntimeError("CargoTel rejected the comment form: " + " ".join(error.group(0).split())[:300])
-        _html, grid = fetch_grid_html(self.session, self.now, saved_id=self.saved_id, days_ahead=self.days_ahead)
-        return verify_comments(grid, comments)
+        _html, grid = self._fetch(sorted(wanted))
+        self.log(f"comment form: {len(wanted)} box(es) on a {len(small.rows)}-row screen, {len(data)} fields; read {fetched - started:.0f} s, "
+                 f"POST {posted - fetched:.0f} s ({len(comment_boxes(html))} rows back), check {time.monotonic() - posted:.0f} s")
+        return verify_comments(grid, wanted)
 
 
 def write_comment_dump(outbox: str, comments: dict[str, str], loads: list[GpsLoad]) -> str:
@@ -1837,8 +1895,9 @@ def run_once(
             log(f"checkpoint failed: {exc}")
 
     # 3. dispatch comments for every load with a ping (still pinging or gone quiet). Last, because it is the
-    # slow part (CargoTel re-renders the whole screen on the POST and again on the check, ten minutes on a
-    # busy afternoon): a Lambda timeout here costs the comments only, and the next run retries them.
+    # riskiest part (a POST to CargoTel; the poster sends only the commented loads' rows since 2026-11-10, a
+    # whole-screen form took over ten minutes): a Lambda timeout here costs the comments only, and the next
+    # run retries them.
     comments = plan_comments(loads, comment_state)
     summary["comments_planned"] = len(comments)
     if comments and post_comments and poster is not None:
@@ -1980,7 +2039,7 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
         session = CargoTelSession(min_interval=0.5)
         page_html, grid = fetch_grid_html(session, now, saved_id=args.saved_id, days_ahead=args.days_ahead, save_html=args.save_html)
         gps_fetch = gps_fetcher(session, now, args.gps_days)
-        poster = CommentPoster(session, now, saved_id=args.saved_id, days_ahead=args.days_ahead)
+        poster = CommentPoster(session, now, saved_id=args.saved_id, days_ahead=args.days_ahead, log=log)
     save_gps = os.path.join(args.save_html, "gps") if args.save_html else None
 
     if args.list:

@@ -215,6 +215,16 @@ Meyers), `--report-hours` (`7,11,15,18`), `--report-quiet-hours`
   values, pickup ETA, current location or status changed. After every post the job
   re-reads the screen and only records the comments that show up, logging `comment NOT
   found on <load>` otherwise.
+- **The form posted is the screen narrowed to the loads being commented** (since
+  2026-11-10). CargoTel re-saves every row of the form it gets, about two seconds a row,
+  so the whole 320-row screen took over ten minutes and timed the Lambda out at 11:00 ET
+  that day (three times, with Lambda's retries). The poster re-reads the screen with its
+  "CargoTel IDs" filter (`Menu__Load_Id`, one id per line) set to those loads, posts that
+  page's whole `Menu_alt` form (the form echoes the filter, so CargoTel re-saves and
+  re-renders only those rows), and checks the comments on the same narrowed screen. A
+  read-only check: 3 ids gave 3 rows and 177 form fields instead of 4,271. Loads that left
+  the screen between the run's read and the post are logged and left for the next run.
+  Each post logs its row count and the seconds spent reading, posting and checking.
 - **One test email went out** at 09:18 ET through SES from vehicles@: the Kyle Link
   group (loads 350364, 349850, 350271, 354448: Kyle as dispatch and sales rep, with
   `--default-manager` standing in for the empty manager column) sent as a marked test
@@ -253,11 +263,16 @@ Meyers), `--report-hours` (`7,11,15,18`), `--report-quiet-hours`
 - **The report goes four times a day, from the 07:00, 11:00, 15:00 and 18:00 ET runs**,
   the user's choice (2026-11-09; it started as once a day at 08:00, then 10:00 and 16:00). `-ReportHours` (deploy) or
   `--report-hours` changes that; `all` makes it every run.
-- **Emails and the report first, the comment form last.** CargoTel takes minutes to
-  re-render the 280-row screen for the comment POST and again for the check (12 of the
-  Lambda's 15 minutes on 2026-11-06 at 15:12), so the run sends everything first, saves
-  the alert state (on AWS: copies it to S3 at once), and only then posts the comments. A
-  timeout costs the comments only; the next run retries them. Its "quiet" threshold is 11 h as asked, apart from the alerts'
+- **Emails and the report first, the comment form last.** The comment POST is the slow,
+  risky part (a whole-screen form took 10 to 12 of the Lambda's 15 minutes before the
+  form was narrowed, see above), so the run sends everything first, saves the alert state
+  (on AWS: copies it to S3 at once), and only then posts the comments. A timeout costs the
+  comments only; the next run retries them. **Lambda's async retries are off**
+  (`MaximumRetryAttempts 0`, set by `deploy.ps1`): with the default two, the timed-out
+  11:00 run of 2026-11-10 ran again at 11:16 and 11:33, each re-posting the whole screen
+  and running into the sales rep sync's :20 slot. The report slot is saved before the
+  comments, so a retry never resent the report, but the next hourly run is the retry now.
+- **The report's "quiet" threshold is 11 h** as asked, apart from the alerts'
   4 h, so a driver quiet for 6 h is in the reps' alert but not in the report. Loads
   quiet for more than 2 days read as "never pinged" (the 48 h window, see above).
 - **The report is sent even when there is nothing to report** ("all N loads scanned are
