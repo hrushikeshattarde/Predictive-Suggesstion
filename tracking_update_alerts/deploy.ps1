@@ -56,7 +56,7 @@ param(
     [string]$DefaultManager = "",
     # The GPS report: the run(s) that send it, by Eastern hour ("7,11,15,18" = the 07:00, 11:00, 15:00 and 18:00 runs, the user's
     # choice; "8" once a day; "all" every run; "-" never), who gets it (default: Justice Cromwell, stellantisob@,
-    # Brett Booth, Podge Ormsby and Mitchell Meyers, the code's list) and the quiet
+    # Brett Booth, Podge Ormsby, Mitchell Meyers and Stuart Mitchell, the code's list) and the quiet
     # threshold it lists.
     [string]$ReportHours = "7,11,15,18",
     [string]$ReportTo = "",
@@ -279,7 +279,7 @@ if ($Send) { $sendState = "ON via SES as $MailFrom" }
 $commentState = "OFF (planned comments go to the outbox)"
 if ($PostComments) { $commentState = "ON (written into CargoTel)" }
 Write-Host ""
-$reportTo = "Justice Cromwell, stellantisob@, Brett Booth, Podge Ormsby, Mitchell Meyers (the code default)"
+$reportTo = "Justice Cromwell, stellantisob@, Brett Booth, Podge Ormsby, Mitchell Meyers, Stuart Mitchell (the code default)"
 if ($ReportTo) { $reportTo = $ReportTo }
 $alertState = "ON (hourly emails to the reps)"
 if ($NoAlerts) { $alertState = "OFF (no emails to the reps; comments and report only)" }

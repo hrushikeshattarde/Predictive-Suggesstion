@@ -785,7 +785,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(email.key, "report")
         self.assertEqual((email.to, email.cc), (list(DEFAULT_REPORT_TO), []))
         self.assertEqual(DEFAULT_REPORT_TO, ("justice.cromwell@circledelivers.com", "stellantisob@circledelivers.com", "brett.booth@circledelivers.com",
-                                             "pormsby@circledelivers.com", "mitchell.meyers@circledelivers.com"))
+                                             "pormsby@circledelivers.com", "mitchell.meyers@circledelivers.com", "smitchell@circledelivers.com"))
         self.assertEqual(email.subject, "GPS tracking report Fri 11/06 09:00: 5 of 11 loads with issues (3 with no GPS pings, 2 quiet for more than 11 h)")
         self.assertEqual(email.load_ids, ["360008", "360002", "354745", "360003", "352243"])
         text = email.text

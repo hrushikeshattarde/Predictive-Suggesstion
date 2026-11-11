@@ -82,7 +82,7 @@ the report (07/11/15/18 ET runs)     the In-Route loads (--report-status) are se
                                      customer and per dispatch rep; then every load with no GPS pings + every
                                      driver quiet for more than 11 h (--report-quiet-hours) by customer and
                                      dispatch rep; To Justice, stellantisob@, Brett Booth, Podge Ormsby and
-                                     Mitchell Meyers (--report-to); once per hour slot
+                                     Mitchell Meyers, Stuart Mitchell (--report-to); once per hour slot
 ```
 
 The comment is the ping as CargoTel prints it plus the place, `2026-11-06 06:12:25-05
@@ -324,6 +324,10 @@ Justice alone to Justice, stellantisob@, Brett Booth, Podge Ormsby and Mitchell 
 13:45 ET with the report hours moved to 07:00, 11:00, 15:00 and 18:00 (`TRACK_REPORT_HOURS=7,11,15,18`),
 so the 15:00 report that day was the first in that shape, to that list, at the new hours. Bucket
 `circle-reload-suggestions`:
+
+
+On 2026-11-11 Stuart Mitchell (smitchell@) was added to the report's recipients, at the user's
+request.
 
 | Key | What |
 | --- | --- |
