@@ -35,9 +35,9 @@ Environment variables::
     TRACK_REPORT_STATUS     statuses scanned for the report only, no comments or alerts (default In-Route; "-" for none)
     TRACK_SAVE_PAGES        "1" archives the fetched pages
     TRACK_MACROPOINT_PREFIX where macropoint_webhook keeps the newest ping per load (default macropoint/latest/; "-" = off)
-    TRACK_POST_LOCATIONS    "1" writes the MacroPoint places into CargoTel's Location/ETA; otherwise they go to outbox/
-    TRACK_MP_MAX_AGE_HOURS  write a MacroPoint ping only while it is at most this old (default 3)
-    TRACK_MP_SAME_PLACE_HOURS  re-write an unchanged place only after this long (default 3)
+    TRACK_POST_LOCATIONS    "1" writes the locations (GPS-link ping, else MacroPoint) into Location/ETA; otherwise outbox/
+    TRACK_MP_MAX_AGE_HOURS  write a MacroPoint ping only while it is at most this old (default 48)
+    TRACK_MP_SAME_PLACE_HOURS  re-write an unchanged MacroPoint place only after this long (default 0: every new ping)
     TRACK_MP_PHONE_MATCH    "0" writes even when MacroPoint's phone differs from the CargoTel driver cell
     TRACK_MP_COMMENTS       "0" stops also posting the MacroPoint place as a dispatch comment labelled (MacroPoint)
     TRACK_WORKDIR           scratch folder (default /tmp/tracking-alerts)

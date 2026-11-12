@@ -61,12 +61,16 @@ only a few dozen rows long.
 ``--no-alerts`` (``TRACK_ALERTS=0``) switches the hourly emails to the reps off while the
 comments and the report carry on (the user's choice from 2026-11-09 14:35 ET).
 
-MacroPoint locations (2026-11-12): with ``--macropoint-dir`` (the newest MacroPoint ping per
-load, written by ``macropoint_webhook/`` and copied from S3 by the Lambda handler) every
-load on the screen, Dispatched or In-Route, whose MacroPoint ping is fresh and new gets the
-ping's place written into its Location/ETA, the way the load page's Location/ETA function
-does it (``macropoint_locations.py``); ``--post-locations`` writes for real, otherwise the
-planned writes go to ``outbox/``. This runs after the emails and before the comment form.
+Locations (2026-11-12, the user's rule): with ``--macropoint-dir`` (the newest MacroPoint
+ping per load, written by ``macropoint_webhook/`` and copied from S3 by the Lambda handler)
+the In-Route loads are GPS-checked every run too, and every load on the screen (Dispatched
+and In-Route, pickup ETA before the screen's date) gets a location: a load with any ping on
+its GPS City/St link gets its last ping written into Location/ETA (the way the load page's
+Location/ETA function does it) and as a dispatch comment, MacroPoint not looked at; a load
+with no ping there at all gets MacroPoint's latest location written into Location/ETA and as
+a comment labelled "(MacroPoint)" (``macropoint_locations.py``). ``--post-locations`` writes
+for real, otherwise the planned writes go to ``outbox/``. This runs after the emails and
+before the comment form.
 
 Usage::
 
@@ -128,6 +132,7 @@ from suggest_reloads import nice_name  # noqa: E402
 from macropoint_locations import (  # noqa: E402
     DEFAULT_MAX_AGE_HOURS as MP_MAX_AGE_HOURS,
     DEFAULT_SAME_PLACE_HOURS as MP_SAME_PLACE_HOURS,
+    LocationPlan,
     LocationState,
     LocationWriter,
     MpPing,
@@ -510,6 +515,36 @@ def screen_loads(grid: Grid, *, statuses: tuple[str, ...] | list[str],
             continue
         out.append(load)
     return out
+
+
+def plan_cargotel_locations(loads: list[GpsLoad], state: LocationState) -> list[LocationPlan]:
+    """The loads with any ping on their GPS City/St link (active or stale) whose last ping is
+    not yet in Location/ETA: newer than the ping last written there, from either source."""
+
+    out: list[LocationPlan] = []
+    for load in loads:
+        ping = load.last_ping
+        if load.tracking not in (ACTIVE, STALE) or ping is None or not ping.where:
+            continue
+        city, _sep, st = ping.where.rpartition(",")
+        mp = MpPing(load_id=load.load_id, when=ping.when.astimezone(timezone.utc), city=city.strip() if _sep else ping.where,
+                    state=st.strip() if _sep else "", postal="", lat=None, lng=None, locator="", source="CargoTel")
+        prev = state.get(load.load_id)
+        if prev:
+            prev_when = _parse_iso(prev.get("ping_utc"))
+            if prev_when and prev_when >= mp.when:
+                continue
+        out.append(LocationPlan(load_id=load.load_id, ping=mp, status=load.status, reason="new ping" if prev else "first",
+                                source="cargotel"))
+    return out
+
+
+def _parse_iso(text: str | None) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(text) if text else None
+    except ValueError:
+        return None
+    return when.replace(tzinfo=timezone.utc) if when and when.tzinfo is None else when
 
 
 def select_loads(
@@ -1837,7 +1872,9 @@ def run_once(
     report_due_now = force_report or (report_due(now, report_hours) and not only_rep)
     extra: list[GpsLoad] = []
     extra_counts: dict[str, int] = {"rows": counts["rows"], "in_status": 0, "excluded": 0, "no_eta": 0, "eta_later": 0, "selected": 0}
-    if report_due_now and report_to and report_statuses:
+    # the In-Route loads: read for the report at its hours, and every run when locations are written (the rule needs
+    # to know whether each load has a GPS-link ping)
+    if report_statuses and ((report_due_now and report_to) or mp_pings is not None):
         extra, extra_warnings, extra_counts = select_loads(grid, now, days_ahead=days_ahead, statuses=report_statuses,
                                                            exclude_customers=exclude_customers)
         for warning in extra_warnings:
@@ -1847,7 +1884,7 @@ def run_once(
         gps_errors += check_gps(extra, gps_fetch, now, stale_hours=stale_hours, max_checks=max(0, max_gps - len(loads)),
                                 save_html=save_gps, log=log)
         extra_state = {kind: sum(1 for l in extra if l.tracking == kind) for kind in (ACTIVE, STALE, NEVER, UNKNOWN)}
-        log(f"report only: {extra_counts['in_status']} {'/'.join(report_statuses)} loads, {extra_counts['excluded']} of an excluded customer, "
+        log(f"{'/'.join(report_statuses)} (no alerts): {extra_counts['in_status']} loads, {extra_counts['excluded']} of an excluded customer, "
             f"{len(extra)} with a pickup ETA before {cutoff:%m/%d/%Y}; GPS: {extra_state[ACTIVE]} active, {extra_state[STALE]} stale, "
             f"{extra_state[NEVER]} never pinged, {extra_state[UNKNOWN]} unreadable")
 
@@ -1942,21 +1979,26 @@ def run_once(
         except Exception as exc:  # noqa: BLE001
             log(f"checkpoint failed: {exc}")
 
-    # 3. MacroPoint locations into Location/ETA, for every load on the screen (Dispatched and In-Route)
-    summary["locations"] = {"on_macropoint": 0, "planned": 0, "written": 0, "failed": 0, "skipped": {}, "writes": {}}
-    # The place written into Location/ETA also goes into the dispatch comments, labelled (MacroPoint): the screen
-    # shows neither Location/ETA nor its "Location Update" history, only the Last Dispatch Comment column.
+    # 3. Locations into Location/ETA for every load on the screen (Dispatched and In-Route): a load with any ping on its
+    # GPS City/St link gets that last ping (its comment comes from step 4, as before); a load with no ping there at all
+    # gets MacroPoint's latest location, and a comment labelled (MacroPoint).
+    summary["locations"] = {"on_macropoint": 0, "planned": 0, "written": 0, "failed": 0, "skipped": {}, "writes": {},
+                            "from_cargotel": 0, "from_macropoint": 0}
+    # The screen shows neither Location/ETA nor its "Location Update" history, only the Last Dispatch Comment column,
+    # hence the (MacroPoint) comment; a CargoTel ping already gets its comment.
     mp_comment_texts: dict[str, str] = {}
     if mp_pings is not None:
         state_l = location_state if location_state is not None else LocationState(None)
-        candidates = screen_loads(grid, statuses=tuple(statuses) + tuple(report_statuses), exclude_customers=exclude_customers)
-        if only_loads is not None:
-            candidates = [l for l in candidates if l.load_id in only_loads]
-        plans, skipped = plan_locations(candidates, mp_pings, state_l, now, max_age_hours=mp_max_age_hours,
-                                        same_place_hours=mp_same_place_hours, match_phone=mp_match_phone)
+        located = loads + extra
+        ct_plans = plan_cargotel_locations(located, state_l)
+        no_ping = [l for l in located if l.tracking == NEVER]
+        mp_plans, skipped = plan_locations(no_ping, mp_pings, state_l, now, max_age_hours=mp_max_age_hours,
+                                           same_place_hours=mp_same_place_hours, match_phone=mp_match_phone)
+        plans = ct_plans + mp_plans
         loc = summary["locations"]
-        loc["on_macropoint"] = sum(1 for l in candidates if l.load_id in mp_pings)
+        loc["on_macropoint"] = sum(1 for l in no_ping if l.load_id in mp_pings)
         loc["planned"], loc["skipped"] = len(plans), skipped
+        loc["from_cargotel"], loc["from_macropoint"] = len(ct_plans), len(mp_plans)
         for load_id, why in skipped.items():
             if "tracks" in why or "future" in why or "no time" in why:
                 log(f"MacroPoint location for {load_id} not written: {why}")
@@ -1964,16 +2006,19 @@ def run_once(
             results = location_writer.apply(plans)
             for plan in plans:
                 ok, detail = results.get(plan.load_id, (False, "not attempted"))
-                loc["writes"][plan.load_id] = {"place": plan.ping.place, "ping_utc": plan.ping.stamp, "written": ok, "detail": detail}
+                loc["writes"][plan.load_id] = {"place": plan.ping.place, "ping_utc": plan.ping.stamp, "source": plan.source,
+                                               "written": ok, "detail": detail}
                 if ok:
                     loc["written"] += 1
-                    state_l.mark(plan.load_id, plan.ping, detail, now)
-                    if mp_comments:
+                    state_l.mark(plan.load_id, plan.ping, detail, now, source=plan.source)
+                    if mp_comments and plan.source == "macropoint":
                         mp_comment_texts[plan.load_id] = mp_comment_text(plan.ping, now.tzinfo)
-                    log(f"location written on {plan.load_id} ({plan.status}): {detail} (MacroPoint {plan.ping.source} ping "
-                        f"{plan.ping.stamp}, {plan.reason})")
+                    origin = "GPS link" if plan.source == "cargotel" else f"MacroPoint {plan.ping.source}"
+                    log(f"location written on {plan.load_id} ({plan.status}): {detail} ({origin} ping {plan.ping.stamp}, {plan.reason})")
                 else:
                     loc["failed"] += 1
+                    if detail.startswith("CargoTel does not know the place"):
+                        state_l.mark(plan.load_id, plan.ping, "", now, source=plan.source)  # not retried for this ping
                     log(f"location NOT written on {plan.load_id}: {detail}")
             state_l.prune(now)
             state_l.save()
@@ -1984,23 +2029,27 @@ def run_once(
                     log(f"checkpoint failed: {exc}")
         elif plans:
             path = write_location_dump(outbox, plans, now)
-            loc["writes"] = {p.load_id: {"place": p.ping.place, "ping_utc": p.ping.stamp, "written": False, "detail": "dry run"} for p in plans}
-            if mp_comments:
-                mp_comment_texts.update({p.load_id: mp_comment_text(p.ping, now.tzinfo) for p in plans})
-            log(f"dry run: {len(plans)} MacroPoint location(s) would be written (listed in {path})")
+            loc["writes"] = {p.load_id: {"place": p.ping.place, "ping_utc": p.ping.stamp, "source": p.source, "written": False,
+                                         "detail": "dry run"} for p in plans}
+            if mp_comments and not post_comments:  # a full dry run lists them; never post a comment for an unwritten location
+                mp_comment_texts.update({p.load_id: mp_comment_text(p.ping, now.tzinfo) for p in mp_plans})
+            log(f"dry run: {len(plans)} location(s) would be written (listed in {path})")
         reasons: dict[str, int] = {}
         for why in skipped.values():
-            head = why.split(",")[0] if why.startswith("still at") else re.sub(r"[\d.]+ h old", "N h old", why).split(" tracks ")[0]
+            head = (why.split(",")[0] if why.startswith("still at") else "MacroPoint phone differs from the driver cell" if " tracks " in why
+                    else re.sub(r"[\d.]+ h old", "N h old", why))
             reasons[head] = reasons.get(head, 0) + 1
-        log(f"MacroPoint: {len(mp_pings)} load(s) with pings on file, {loc['on_macropoint']} of them on the screen; "
-            f"{loc['planned']} location(s) to write, {loc['written']} written, {loc['failed']} failed; skipped: "
+        log(f"locations: {len(located)} loads, {len(ct_plans)} from a GPS-link ping, {len(no_ping)} with no GPS-link ping "
+            f"({loc['on_macropoint']} of them on MacroPoint, {len(mp_plans)} to write from it); {loc['written']} written, "
+            f"{loc['failed']} failed; MacroPoint skipped: "
             + (", ".join(f"{n} {why}" for why, n in sorted(reasons.items(), key=lambda kv: -kv[1])) or "none"))
 
     # 4. dispatch comments for every load with a ping (still pinging or gone quiet). Last, because it is the
     # riskiest part (a POST to CargoTel; the poster sends only the commented loads' rows since 2026-11-10, a
     # whole-screen form took over ten minutes): a Lambda timeout here costs the comments only, and the next
     # run retries them.
-    gps_comments = plan_comments(loads, comment_state)
+    comment_loads = loads + extra if mp_pings is not None else loads
+    gps_comments = plan_comments(comment_loads, comment_state)
     comments = dict(gps_comments)
     for load_id, text in mp_comment_texts.items():
         # one box per load per POST: a load with a new driver-app ping and a MacroPoint ping gets both in one comment
@@ -2020,7 +2069,7 @@ def run_once(
             if ok:
                 summary["comments_written"] += 1
                 if load_id in gps_comments:
-                    ping = next((l.last_ping for l in loads if l.load_id == load_id), None)
+                    ping = next((l.last_ping for l in comment_loads if l.load_id == load_id), None)
                     comment_state.mark(load_id, ping.stamp if ping else "", text, now)
                 log(f"comment added on {load_id}: {text}")
             else:
@@ -2029,7 +2078,7 @@ def run_once(
         comment_state.prune(now)
         comment_state.save()
     elif comments:
-        path = write_comment_dump(outbox, comments, loads)
+        path = write_comment_dump(outbox, comments, comment_loads)
         summary["comments"] = {load_id: {"text": text, "written": False} for load_id, text in comments.items()}
         log(f"dry run: {len(comments)} comment(s) would be added (written to {path})")
     else:
@@ -2099,9 +2148,9 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
     parser.add_argument("--location-state", default=os.path.join(HERE, "location_state.json"),
                         help="which MacroPoint ping was written on each load")
     parser.add_argument("--mp-max-age-hours", type=float, default=MP_MAX_AGE_HOURS,
-                        help="write a MacroPoint ping only while it is at most this old (default 3)")
+                        help="write a MacroPoint ping only while it is at most this old (default 48, the GPS link's window)")
     parser.add_argument("--mp-same-place-hours", type=float, default=MP_SAME_PLACE_HOURS,
-                        help="re-write an unchanged place only after this long (default 3)")
+                        help="re-write an unchanged MacroPoint place only after this long (default 0: every new ping)")
     parser.add_argument("--no-mp-comments", action="store_true",
                         help="do not also post the MacroPoint place as a dispatch comment labelled (MacroPoint)")
     parser.add_argument("--mp-no-phone-match", action="store_true",
@@ -2224,7 +2273,8 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
         f"{summary['comments_planned']} comment(s) planned, {summary['comments_written']} written, {summary['comments_failed']} failed, "
         f"{len(summary['emails'])} email(s), {summary['skipped_repeat']} load(s) already alerted, {len(summary['gps_errors'])} GPS error(s)"
         + (f"; report: {len(summary['report']['never'])} never pinged, {len(summary['report']['quiet'])} quiet" if summary.get("report") else "")
-        + (f"; MacroPoint locations: {summary['locations']['written']} written, {summary['locations']['failed']} failed"
+        + (f"; locations: {summary['locations']['from_cargotel']} from the GPS link, {summary['locations']['from_macropoint']} from MacroPoint, "
+           f"{summary['locations']['written']} written, {summary['locations']['failed']} failed"
            if args.macropoint_dir else ""))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:

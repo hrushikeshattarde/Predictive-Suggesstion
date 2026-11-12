@@ -1,4 +1,11 @@
-"""MacroPoint pings -> CargoTel "Location/ETA" for the loads on Kesh: Tracking Update Screen.
+"""Pings -> CargoTel "Location/ETA" for the loads on Kesh: Tracking Update Screen.
+
+The rule (the user's, 2026-11-12): a load with any ping on its "GPS City/St Link" (the
+CargoTel driver app, last 2 days) gets that last ping written into Location/ETA and as a
+dispatch comment, and MacroPoint is not looked at; a load with no ping there at all gets
+MacroPoint's latest location written into Location/ETA and as a comment labelled
+"(MacroPoint)". The CargoTel side is planned in ``tracking_update_alerts.run_once``; this
+module holds the MacroPoint side and the writer both share.
 
 The MacroPoint receiver (``macropoint_webhook/``) keeps the newest MacroPoint ping of each
 CargoTel load in ``s3://.../macropoint/latest/<load>.json``; the hourly run copies those
@@ -13,12 +20,12 @@ answer in the field (``31029 (Forsyth, GA)``; an answer starting with ``*`` mean
 valid City, State or Zip"); this module does the same. CargoTel answers "Location Updated"
 and records a "Location Update" comment on the load (``Location Update: FORSYTH GA 31029``).
 
-A load is written when its newest MacroPoint ping:
+A load with no CargoTel ping is written from MacroPoint when MacroPoint's newest ping:
 
-* is at most ``max_age_hours`` old (a quiet driver's last place is not written as current);
-* is newer than the ping last written on that load (``location_state.json``);
-* names a different place than the last write, or the same place more than
-  ``same_place_hours`` after it (a parked truck is not re-written every hour);
+* is at most ``max_age_hours`` old (default 48, the same two days the GPS link covers);
+* is newer than the ping last written on that load, from either source (``location_state.json``);
+* (optional, off by default) names a different place than the last write or comes
+  ``same_place_hours`` after it;
 * tracks the load's driver: when MacroPoint's locator and CargoTel's driver cell are both
   phone numbers they must match (the account also tracks TransportPro loads, whose order
   ids could collide with a CargoTel load number); a truck or ELD locator is accepted.
@@ -33,8 +40,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
-DEFAULT_MAX_AGE_HOURS = 3.0
-DEFAULT_SAME_PLACE_HOURS = 3.0
+#: MacroPoint pings up to two days old count, like the GPS link's own two-day window.
+DEFAULT_MAX_AGE_HOURS = 48.0
+#: 0 = a new ping is written even at the same place (as the driver-app comments are).
+DEFAULT_SAME_PLACE_HOURS = 0.0
 ZIP_SERVICE_PATH = "/cargotel/zipService.mcgi"
 LOCATION_FORM_PATH = "/cargotel/db.mcgi"
 
@@ -127,8 +136,9 @@ class LocationState:
     def get(self, load_id: str) -> dict[str, str] | None:
         return self.written.get(load_id)
 
-    def mark(self, load_id: str, ping: MpPing, value: str, now: datetime) -> None:
-        self.written[load_id] = {"ping_utc": ping.stamp, "place": ping.place, "value": value, "at": now.isoformat(timespec="seconds")}
+    def mark(self, load_id: str, ping: MpPing, value: str, now: datetime, source: str = "macropoint") -> None:
+        self.written[load_id] = {"ping_utc": ping.stamp, "place": ping.place, "value": value, "source": source,
+                                 "at": now.isoformat(timespec="seconds")}
 
     def prune(self, now: datetime, keep_days: int = 30) -> None:
         cutoff = now - timedelta(days=keep_days)
@@ -152,7 +162,8 @@ class LocationPlan:
     load_id: str
     ping: MpPing
     status: str
-    reason: str  # "first" | "moved" | "refresh"
+    reason: str  # "first" | "moved" | "refresh" | "new ping"
+    source: str = "macropoint"  # or "cargotel"
 
 
 def plan_locations(
@@ -201,7 +212,7 @@ def plan_locations(
                 continue
             prev_at = _when(prev.get("at"))
             if prev.get("place") == ping.place:
-                if prev_at and (now - prev_at).total_seconds() / 3600 < same_place_hours:
+                if same_place_hours > 0 and prev_at and (now - prev_at).total_seconds() / 3600 < same_place_hours:
                     skipped[load.load_id] = f"still at {ping.place}, written {(now - prev_at).total_seconds() / 3600:.1f} h ago"
                     continue
                 reason = "refresh"
@@ -284,6 +295,6 @@ def write_location_dump(outbox: str, plans: list[LocationPlan], now: datetime) -
     with open(path, "w", encoding="utf-8") as handle:
         for plan in plans:
             age = (now - plan.ping.when).total_seconds() / 60 if plan.ping.when else 0
-            handle.write(f"{plan.load_id} | {plan.status} | {plan.ping.place} | ping {plan.ping.stamp} ({age:.0f} min ago) | "
+            handle.write(f"{plan.load_id} | {plan.status} | {plan.source} | {plan.ping.place} | ping {plan.ping.stamp} ({age:.0f} min ago) | "
                          f"{plan.ping.source} {plan.ping.locator} | {plan.reason}\n")
     return path
