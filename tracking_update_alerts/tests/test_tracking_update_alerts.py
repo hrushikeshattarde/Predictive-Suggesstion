@@ -26,6 +26,7 @@ from send_drafts import load_rep_details  # noqa: E402
 from tracking_update_alerts import (  # noqa: E402
     ACTIVE,
     DEFAULT_ESCALATE,
+    DEFAULT_NOPING_REPORT_TO,
     DEFAULT_REPORT_TO,
     DEFAULT_STELLANTIS_TO,
     NEVER,
@@ -41,6 +42,7 @@ from tracking_update_alerts import (  # noqa: E402
     comment_boxes,
     comment_text,
     compose,
+    compose_noping_report,
     compose_report,
     customer_excluded,
     eta_cutoff,
@@ -842,6 +844,85 @@ class ReportTests(unittest.TestCase):
         self.assertIn("100.00%", email.text)
         self.assertEqual(email.load_ids, [])
 
+class NoPingReportTests(unittest.TestCase):
+    """The short report for Stuart Mitchell: only No Pings, OK and the tracking rate; OK = pinged at
+    least once in the GPS window (quiet drivers included); the list is the no-ping loads only."""
+
+    def test_compose(self):
+        loads, _w, counts, _e = checked_loads()
+        extra, _w2, _c2 = select_loads(parse_grid(PAGE), NOW, statuses=("In-Route",))
+        check_gps(extra, fetch_gps, NOW)
+        email = compose_noping_report(loads + extra, now=NOW, to=list(DEFAULT_NOPING_REPORT_TO), counts=counts)
+        self.assertEqual(DEFAULT_NOPING_REPORT_TO, ("smitchell@circledelivers.com",))
+        self.assertEqual((email.key, email.to, email.cc), ("noping-report", ["smitchell@circledelivers.com"], []))
+        # 11 loads: 3 no pings, 1 unreadable (left out), 7 with pings -> 7 of 10 = 70.00%
+        self.assertEqual(email.subject, "GPS no-ping report Fri 11/06 09:00: 3 of 10 loads with no GPS pings (70.00% tracking)")
+        self.assertEqual(email.load_ids, ["360008", "360002", "354745"])
+        text = email.text
+        self.assertTrue(text.startswith("Hi Stuart,\n"))
+        self.assertIn("OK = at least one ping in that time; the tracking rate is OK out of No Pings + OK.", text)
+        self.assertIn("  status      no pings  OK  tracking rate\n", text)
+        self.assertIn("  Dispatched         2   6         75.00%\n", text)
+        self.assertIn("  In-Route           1   1         50.00%\n", text)
+        self.assertIn("  All                3   7         70.00%\n", text)
+        self.assertIn("  Stellantis (fca)                                   1   2         66.67%\n", text)
+        self.assertIn("NO GPS PINGS (3)", text)
+        self.assertNotIn("QUIET", text)
+        self.assertNotIn("quiet > 11 h", text)
+        self.assertIn("GPS PAGE UNREADABLE (1, not counted): 360009", text)
+        html = email.html
+        for header in ("No Pings", "OK", "Tracking Rate"):
+            self.assertIn(f'border-bottom:2px solid #999">{header}</th>', html)
+        self.assertNotIn("Total Scanned", html)
+        self.assertNotIn("Quiet", html)
+        self.assertIn("load_id=354745", html)
+        # nothing missing
+        email = compose_noping_report([l for l in loads if l.tracking == ACTIVE], now=NOW, to=["smitchell@circledelivers.com"])
+        self.assertEqual(email.subject, "GPS no-ping report Fri 11/06 09:00: every load has GPS pings (2 loads)")
+
+    def test_schedule_force_and_recipients(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            state = AlertState(os.path.join(tmp, "a.json"))
+
+            def run(now, **kw):
+                transport = FakeTransport()
+                summary = run_once(PAGE, parse_grid(PAGE), now=now, reps=REPS, gps_fetch=fetch_gps, state=state,
+                                   comment_state=CommentState(None), transport=transport, poster=FakePoster(), from_addr="x",
+                                   record=kw.pop("record", True), post_comments=False, sent_log=None, outbox=os.path.join(tmp, "o"),
+                                   send_alerts=False, **kw)
+                return summary, [e for e, _f in transport.sent]
+
+            summary, sent = run(NOW.replace(hour=7))
+            self.assertEqual([e.key for e in sent], ["report", "noping-report"])
+            self.assertEqual(sent[1].to, ["smitchell@circledelivers.com"])
+            self.assertEqual(state.noping_report["slot"], "2026-11-06 07")
+            self.assertEqual(AlertState(os.path.join(tmp, "a.json")).noping_report["slot"], "2026-11-06 07")
+            summary, sent = run(NOW.replace(hour=7, minute=30))
+            self.assertEqual(sent, [])  # once per hour slot
+            summary, sent = run(NOW)  # 09:00 is not a report hour
+            self.assertEqual(sent, [])
+            summary, sent = run(NOW, force_noping_report=True, redirect_to=["me@circledelivers.com"])
+            self.assertEqual([e.subject[:30] for e in sent], ["[Test copy] GPS no-ping report"])
+            self.assertEqual(sent[0].to, ["me@circledelivers.com"])
+            summary, sent = run(NOW.replace(hour=11), noping_report_to=())
+            self.assertEqual([e.key for e in sent], ["report"])
+            summary, sent = run(NOW.replace(hour=15), noping_report_hours=())
+            self.assertEqual([e.key for e in sent], ["report"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_lambda_settings(self):
+        args = tracking_update_lambda.alert_args("/w", {"TRACK_NOPING_REPORT_TO": "a@x.com", "TRACK_NOPING_REPORT_HOURS": "8"},
+                                                 {"noping_report": True})
+        self.assertEqual(args[args.index("--noping-report-to") + 1], "a@x.com")
+        self.assertEqual(args[args.index("--noping-report-hours") + 1], "8")
+        self.assertIn("--noping-report", args)
+        args = tracking_update_lambda.alert_args("/w", {"TRACK_NOPING_REPORT_TO": "-"}, {"report": True})
+        self.assertEqual(args[args.index("--noping-report-to") + 1], "")
+        self.assertNotIn("--noping-report", args)
+
+
 class SteadyRuleTests(unittest.TestCase):
     """A load quiet for more than 11 h is not a report issue when its driver pinged steadily in the
     past 16 h: at least 5 pings, none more than 3 h apart (the operations team's example: 356838,
@@ -980,12 +1061,12 @@ class RunTests(unittest.TestCase):
 
         class Transport(FakeTransport):
             def send(self, email, from_addr):
-                order.append("report" if email.key == "report" else "email")
+                order.append({"report": "report", "noping-report": "noping"}.get(email.key, "email"))
                 return super().send(email, from_addr)
 
         summary, transport, poster = self.run_once(record=True, post_comments=True, now=NOW.replace(hour=15), transport=Transport(),
                                                    poster=Poster(), checkpoint=lambda: order.append("checkpoint"))
-        self.assertEqual(order, ["email"] * 6 + ["report", "checkpoint", "comments"])
+        self.assertEqual(order, ["email"] * 6 + ["report", "noping", "checkpoint", "comments"])
         self.assertEqual((summary["comments_written"], len(summary["emails"])), (5, 6))
         self.assertEqual(sorted(poster.calls[0]), sorted(STALE_AND_ACTIVE_COMMENTS))  # no comment on the pinging In-Route load 360011
         self.assertEqual(self.state.report["slot"], "2026-11-06 15")
@@ -1003,7 +1084,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(poster.calls, [STALE_AND_ACTIVE_COMMENTS])
         self.assertEqual(summary["comments_written"], 5)
         reports = [e for e, _f in transport.sent if e.key == "report"]
-        self.assertEqual(len(transport.sent), 1)
+        self.assertEqual([e.key for e, _f in transport.sent], ["report", "noping-report"])
         self.assertEqual(reports[0].to, list(DEFAULT_REPORT_TO))
         self.assertIn("The hourly GPS alerts to the reps are switched off", reports[0].text)
         self.assertNotIn("The reps get the hourly GPS alerts", reports[0].text)

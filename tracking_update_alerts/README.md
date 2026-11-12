@@ -141,6 +141,20 @@ loads with issues (41 with no GPS pings, 11 quiet for more than 11 h)`. A run at
 11 h, 57 fine; Kingbee 26, Stellantis 10, Enterprise Utah 5, Kar Korner 5, ...; Victoria
 Storm 20, Juan Bernal 13, Kyle Link 5, ...
 
+### The short no-ping report for Stuart Mitchell (since 2026-11-12 16:36 ET)
+
+Asked for on 2026-11-12: a copy of the report with only No Pings, OK and the tracking rate, to
+Stuart Mitchell (smitchell@) alone. It goes out from the same runs as the full report (07:00,
+11:00, 15:00, 18:00 ET; `--noping-report-hours`, `TRACK_NOPING_REPORT_HOURS`), once per hour
+slot (`alert_state.json` "noping_report"), recipients `--noping-report-to` /
+`TRACK_NOPING_REPORT_TO`; `--noping-report` or a Lambda event `{"noping_report": true}` sends
+it from any run. **No Pings** = no position on the GPS City/St link in the last 2 days;
+**OK** = at least one ping in that time (quiet drivers count as OK here); the **tracking
+rate** is OK out of No Pings + OK (unreadable GPS pages left out). The email has the same
+Status / By customer / By dispatch rep tables with just those three columns, then the list of
+the no-ping loads. A marked test copy went to Stuart at 16:35 ET on 2026-11-12 (22 of 145 loads
+with no GPS pings, 84.83% tracking).
+
 ### Steady pinging before a quiet spell is not a report issue (since 2026-11-12 16:26 ET)
 
 Asked for by the operations team on 2026-11-12: load 356838 was listed as quiet for more than

@@ -33,6 +33,8 @@ Environment variables::
     TRACK_REPORT_HOURS      Eastern hour(s) whose run sends the report: "7,11,15,18" (default), "8", "all", "-" (never)
     TRACK_REPORT_QUIET_HOURS  the report lists drivers quiet for longer than this (default 11)
     TRACK_REPORT_STATUS     statuses scanned for the report only, no comments or alerts (default In-Route; "-" for none)
+    TRACK_NOPING_REPORT_TO / _HOURS  the short no-ping report (No Pings, OK, tracking rate): recipients (default Stuart
+                            Mitchell) and hours (default 7,11,15,18); "-" = nobody / never
     TRACK_REPORT_STEADY_HOURS / _PINGS / _GAP_HOURS  a quiet load is not a report issue when its driver pinged steadily:
                             at least _PINGS pings in the past _HOURS, none more than _GAP_HOURS apart (16 / 5 / 3; hours 0 = off)
     TRACK_SAVE_PAGES        "1" archives the fetched pages
@@ -113,7 +115,8 @@ def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | Non
             args += [option, env[name]]
     # "-" switches a default off (an empty Lambda variable reads as unset).
     for option, name in (("--exclude-customer", "TRACK_EXCLUDE_CUSTOMERS"), ("--report-to", "TRACK_REPORT_TO"),
-                         ("--report-hours", "TRACK_REPORT_HOURS"), ("--report-status", "TRACK_REPORT_STATUS")):
+                         ("--report-hours", "TRACK_REPORT_HOURS"), ("--report-status", "TRACK_REPORT_STATUS"),
+                         ("--noping-report-to", "TRACK_NOPING_REPORT_TO"), ("--noping-report-hours", "TRACK_NOPING_REPORT_HOURS")):
         if env.get(name):
             args += [option, "" if env[name].strip() == "-" else env[name]]
     if env.get("TRACK_REPORT_QUIET_HOURS"):
@@ -124,6 +127,8 @@ def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | Non
             args += [option, env[name]]
     if isinstance(event, Mapping) and str(event.get("report", "")).strip().lower() in ("1", "true", "yes", "on"):
         args.append("--report")
+    if isinstance(event, Mapping) and str(event.get("noping_report", "")).strip().lower() in ("1", "true", "yes", "on"):
+        args.append("--noping-report")
     if flag(env, "TRACK_SEND"):
         args.append("--send")
     if flag(env, "TRACK_POST_COMMENTS"):
