@@ -9,7 +9,9 @@ are a fake session.
 
 GPS-link state of the fixture at NOW (09:00 EST, 2026-11-06): pinging or quiet (has pings):
 352242, 352243, 360001, 360003, 360006, 360010 (Dispatched) and 360011 (In-Route); no ping at
-all: 354745, 360002 (Dispatched) and 360008 (In-Route); unreadable: 360009."""
+all: 354745, 360002 (Dispatched) and 360008 (In-Route); unreadable: 360009. The 4-hour fallback
+sends the quiet ones (352243, 360001, 360003, 360010: last GPS-link ping 4.5 to 69 hours old)
+to MacroPoint too; only 352242, 360006 and 360011 are written from the GPS link."""
 
 import json
 import os
@@ -55,12 +57,12 @@ PINGS = {
     "360002": ping("360002", 15, city="Provo", state="UT"),
     "360008": ping("360008", 10, city="Toledo", state="OH", locator="9999999999"),
     "352242": ping("352242", 5, city="Joliet", state="IL", locator="3127145408"),
+    "360003": ping("360003", 25, city="Salt Lake City", state="UT"),
     "999999": ping("999999", 5),
 }
 #: Location/ETA writes of a first live run: (load, source, place).
-FIRST_RUN = [("360010", "cargotel", "Gary, IN"), ("352242", "cargotel", "Oak Lawn, IL"), ("352243", "cargotel", "Rockford, IL"),
-             ("360006", "cargotel", "Joliet, IL"), ("360001", "cargotel", "Columbia, MO"), ("360003", "cargotel", "Ogden, UT"),
-             ("360011", "cargotel", "Cheyenne, WY"), ("354745", "macropoint", "Macon, GA"), ("360002", "macropoint", "Provo, UT")]
+FIRST_RUN = [("352242", "cargotel", "Oak Lawn, IL"), ("360006", "cargotel", "Joliet, IL"), ("360011", "cargotel", "Cheyenne, WY"),
+             ("354745", "macropoint", "Macon, GA"), ("360002", "macropoint", "Provo, UT"), ("360003", "macropoint", "Salt Lake City, UT")]
 
 
 class FakeSession:
@@ -141,15 +143,16 @@ class RuleTests(Base):
         summary, poster = self.run_once(poster=Poster(), mp_pings=PINGS, location_writer=writer, post_locations=True,
                                         checkpoint=lambda: order.append("checkpoint"))
         self.assertEqual(order, ["checkpoint", "locations", "checkpoint", "comments"])
-        self.assertEqual(writer.calls, [FIRST_RUN])  # 352242 from its GPS-link ping (Oak Lawn), not MacroPoint's Joliet
+        self.assertEqual((len(writer.calls), sorted(writer.calls[0])), (1, sorted(FIRST_RUN)))  # 352242: GPS link (Oak Lawn), not Joliet
         loc = summary["locations"]
-        self.assertEqual((loc["from_cargotel"], loc["from_macropoint"], loc["written"], loc["failed"]), (7, 2, 9, 0))
+        self.assertEqual((loc["from_cargotel"], loc["from_macropoint"], loc["written"], loc["failed"]), (3, 3, 6, 0))
         self.assertEqual(loc["skipped"], {"360008": "MacroPoint tracks 9999999999, the CargoTel driver cell is 5862343689"})
         self.assertNotIn("360009", loc["writes"])  # GPS page unreadable: no location from either source
         self.assertEqual(poster.calls, [{
             "360010": "2026-11-06 01:00:00-05 Gary, IN", "352242": "2026-11-06 06:12:25-05 Oak Lawn, IL",
             "352243": "2026-11-05 14:00:00-05 Rockford, IL", "360001": "2026-11-06 04:30:00-05 Columbia, MO",
-            "360003": "2026-11-03 12:00:00-05 Ogden, UT", "360011": "2026-11-06 08:45:00-05 Cheyenne, WY",
+            "360003": "2026-11-03 12:00:00-05 Ogden, UT | 2026-11-06 08:35:00-05 Salt Lake City, UT (MacroPoint)",
+            "360011": "2026-11-06 08:45:00-05 Cheyenne, WY",
             "354745": "2026-11-06 08:40:00-05 Macon, GA (MacroPoint)", "360002": "2026-11-06 08:45:00-05 Provo, UT (MacroPoint)"}])
         # 360006: Location/ETA written, no comment (its last dispatch comment already carries that ping)
         self.assertEqual(self.location_state.get("360006")["source"], "cargotel")
@@ -170,13 +173,13 @@ class RuleTests(Base):
         self.assertEqual(poster.calls, [{"354745": "2026-11-06 09:55:00-05 Perry, GA (MacroPoint)"}])
 
     def test_a_failed_write_is_retried_and_not_commented(self):
-        writer = FakeWriter(fail={"360002", "352243"})
+        writer = FakeWriter(fail={"360002", "352242"})
         summary, poster = self.run_once(mp_pings=PINGS, location_writer=writer, post_locations=True)
         self.assertEqual(summary["locations"]["failed"], 2)
         self.assertNotIn("360002", poster.calls[0])  # MacroPoint location not written: no (MacroPoint) comment
-        self.assertIn("352243", poster.calls[0])  # a GPS-link ping keeps its comment, as before
+        self.assertIn("352242", poster.calls[0])  # a GPS-link ping keeps its comment, as before
         summary, _p = self.run_once(mp_pings=PINGS, location_writer=FakeWriter(), post_locations=True, now=NOW + timedelta(minutes=50))
-        self.assertEqual(sorted(summary["locations"]["writes"]), ["352243", "360002"])
+        self.assertEqual(sorted(summary["locations"]["writes"]), ["352242", "360002"])
 
     def test_an_unknown_place_is_not_retried_every_hour(self):
         class Writer(FakeWriter):
@@ -195,8 +198,9 @@ class RuleTests(Base):
         writer = FakeWriter()
         summary, poster = self.run_once(mp_pings=PINGS, location_writer=writer, post_locations=False, post_comments=False)
         self.assertEqual(writer.calls, [])
-        self.assertEqual(summary["locations"]["planned"], 9)
+        self.assertEqual(summary["locations"]["planned"], 6)
         files = os.listdir(self.outbox)
+        self.assertEqual(summary["locations"]["from_macropoint"], 3)
         with open(os.path.join(self.outbox, [f for f in files if f.endswith("_locations.txt")][0]), encoding="utf-8") as handle:
             text = handle.read()
         self.assertIn("352242 | Dispatched | cargotel | Oak Lawn, IL | ping", text)
@@ -213,7 +217,7 @@ class RuleTests(Base):
 
     def test_switch_off_macropoint_comments(self):
         summary, poster = self.run_once(mp_pings=PINGS, location_writer=FakeWriter(), post_locations=True, mp_comments=False)
-        self.assertEqual(summary["locations"]["from_macropoint"], 2)
+        self.assertEqual(summary["locations"]["from_macropoint"], 3)
         self.assertNotIn("354745", poster.calls[0])
 
     def test_off_without_the_location_step(self):
@@ -224,8 +228,33 @@ class RuleTests(Base):
 
     def test_only_loads(self):
         writer = FakeWriter()
-        self.run_once(mp_pings=PINGS, location_writer=writer, post_locations=True, only_loads={"360002", "352243"})
-        self.assertEqual(writer.calls, [[("352243", "cargotel", "Rockford, IL"), ("360002", "macropoint", "Provo, UT")]])
+        self.run_once(mp_pings=PINGS, location_writer=writer, post_locations=True, only_loads={"360002", "352242"})
+        self.assertEqual(writer.calls, [[("352242", "cargotel", "Oak Lawn, IL"), ("360002", "macropoint", "Provo, UT")]])
+
+
+class FallbackTests(Base):
+    def test_4_hour_boundary(self):
+        from tracking_update_alerts import split_by_gps_age
+
+        loads = {l.load_id: l for l in checked()}
+        recent, fallback = split_by_gps_age(list(loads.values()), NOW)
+        self.assertEqual(sorted(l.load_id for l in recent), ["352242", "360006", "360011"])  # 2.8 h, 0.5 h, 0.25 h
+        self.assertEqual(sorted(l.load_id for l in fallback),
+                         ["352243", "354745", "360001", "360002", "360003", "360008", "360010"])  # 4.5 h and older, or none
+        self.assertNotIn("360009", [l.load_id for l in recent + fallback])  # unreadable
+        recent, fallback = split_by_gps_age(list(loads.values()), NOW, fallback_hours=80)
+        self.assertIn("360003", [l.load_id for l in recent])
+        recent, fallback = split_by_gps_age(list(loads.values()), NOW + timedelta(hours=1.25))
+        self.assertIn("352242", [l.load_id for l in fallback])  # now just past 4 h
+
+    def test_old_ping_without_macropoint_writes_nothing_new(self):
+        writer = FakeWriter()
+        pings = {k: v for k, v in PINGS.items() if k != "360003"}
+        summary, _p = self.run_once(mp_pings=pings, location_writer=writer, post_locations=True)
+        self.assertNotIn("360003", [lid for lid, _s, _p in writer.calls[0]])
+        summary, _p = self.run_once(mp_pings=PINGS, location_writer=FakeWriter(), post_locations=True, gps_fallback_hours=80,
+                                    now=NOW + timedelta(minutes=1))
+        self.assertEqual(summary["locations"]["writes"]["360003"]["source"], "cargotel")
 
 
 class CargoTelPlanTests(unittest.TestCase):
@@ -340,6 +369,8 @@ class LambdaAndCliTests(unittest.TestCase):
         self.assertIn("--mp-no-phone-match", args)
         self.assertIn("--no-mp-comments", args)
         self.assertNotIn("--macropoint-dir", tracking_update_lambda.alert_args("/w", {"TRACK_MACROPOINT_PREFIX": "-"}))
+        args = tracking_update_lambda.alert_args("/w", {"TRACK_GPS_FALLBACK_HOURS": "36"})
+        self.assertEqual(args[args.index("--gps-fallback-hours") + 1], "36")
 
     def test_cli_dry_run_offline(self):
         tmp = tempfile.mkdtemp()
@@ -366,7 +397,7 @@ class LambdaAndCliTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             with open(out, encoding="utf-8") as handle:
                 data = json.load(handle)
-            self.assertEqual((data["locations"]["from_cargotel"], data["locations"]["from_macropoint"]), (7, 2))
+            self.assertEqual((data["locations"]["from_cargotel"], data["locations"]["from_macropoint"]), (3, 3))
             self.assertEqual(sorted(data["locations"]["writes"]), sorted(l for l, _s, _p in FIRST_RUN))
             self.assertFalse(os.path.exists(os.path.join(tmp, "l.json")))  # dry run: nothing remembered
         finally:

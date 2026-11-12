@@ -160,13 +160,14 @@ MacroPoint's Location Updates callback and keeps the newest ping per load in
 `macropoint/` and the run (`--macropoint-dir`) writes locations right after the emails and
 before the comment form. **The rule (the user's words, applied as stated):**
 
-- **A load with any ping on its GPS City/St link** (the driver app, last 2 days; pinging or
-  quiet) gets its last ping written into Location/ETA and as a dispatch comment
-  (`2026-11-06 06:12:25-05 Oak Lawn, IL`, the comment the job already wrote). MacroPoint is
-  not looked at, even when it has a newer ping.
-- **A load with no ping there at all** gets MacroPoint's latest location written into
-  Location/ETA and as a dispatch comment labelled `(MacroPoint)`
-  (`2026-11-12 10:09:00-05 Covington, GA (MacroPoint)`).
+- **A load with a ping on its GPS City/St link in the last 4 hours** (the driver app, still
+  pinging; `--gps-fallback-hours`, `TRACK_GPS_FALLBACK_HOURS`) gets its last ping written into
+  Location/ETA and as a dispatch comment (`2026-11-06 06:12:25-05 Oak Lawn, IL`, the comment
+  the job already wrote). MacroPoint is not looked at, even when it has a newer ping.
+- **A load with no ping there at all, or none in the last 4 hours** (the user's change,
+  2026-11-12 11:52; the job's "quiet" line) gets MacroPoint's latest location written into Location/ETA and as a
+  dispatch comment labelled `(MacroPoint)` (`2026-11-12 10:09:00-05 Covington, GA (MacroPoint)`).
+  If MacroPoint has nothing for it, nothing new is written.
 - **A load whose GPS page could not be read** gets nothing from either source.
 
 Details:

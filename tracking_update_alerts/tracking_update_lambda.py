@@ -40,6 +40,7 @@ Environment variables::
     TRACK_MP_SAME_PLACE_HOURS  re-write an unchanged MacroPoint place only after this long (default 0: every new ping)
     TRACK_MP_PHONE_MATCH    "0" writes even when MacroPoint's phone differs from the CargoTel driver cell
     TRACK_MP_COMMENTS       "0" stops also posting the MacroPoint place as a dispatch comment labelled (MacroPoint)
+    TRACK_GPS_FALLBACK_HOURS  a GPS-link ping older than this counts like no ping: MacroPoint is used (default 4)
     TRACK_WORKDIR           scratch folder (default /tmp/tracking-alerts)
     MAIL_FROM               verified SES sender (default the vehicles@ group)
     SES_CONFIGURATION_SET   SES configuration set for bounce/complaint events
@@ -99,6 +100,8 @@ def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | Non
             args += [option, env[name]]
     if "TRACK_MP_PHONE_MATCH" in env and env["TRACK_MP_PHONE_MATCH"].strip() and not flag(env, "TRACK_MP_PHONE_MATCH"):
         args.append("--mp-no-phone-match")
+    if env.get("TRACK_GPS_FALLBACK_HOURS"):
+        args += ["--gps-fallback-hours", env["TRACK_GPS_FALLBACK_HOURS"]]
     if "TRACK_MP_COMMENTS" in env and env["TRACK_MP_COMMENTS"].strip() and not flag(env, "TRACK_MP_COMMENTS"):
         args.append("--no-mp-comments")
     for option, name in (("--status", "TRACK_STATUS"), ("--stellantis-to", "TRACK_STELLANTIS_TO"),

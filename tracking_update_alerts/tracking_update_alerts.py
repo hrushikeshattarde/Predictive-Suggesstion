@@ -65,10 +65,11 @@ Locations (2026-11-12, the user's rule): with ``--macropoint-dir`` (the newest M
 ping per load, written by ``macropoint_webhook/`` and copied from S3 by the Lambda handler)
 the In-Route loads are GPS-checked every run too, and every load on the screen (Dispatched
 and In-Route, pickup ETA before the screen's date) gets a location: a load with any ping on
-its GPS City/St link gets its last ping written into Location/ETA (the way the load page's
-Location/ETA function does it) and as a dispatch comment, MacroPoint not looked at; a load
-with no ping there at all gets MacroPoint's latest location written into Location/ETA and as
-a comment labelled "(MacroPoint)" (``macropoint_locations.py``). ``--post-locations`` writes
+its GPS City/St link in the last 4 hours (``--gps-fallback-hours``) gets its last ping
+written into Location/ETA (the way the load page's Location/ETA function does it) and as a
+dispatch comment, MacroPoint not looked at; a load with no ping there at all, or only older
+ones, gets MacroPoint's latest location written into Location/ETA and as a comment labelled
+"(MacroPoint)" (``macropoint_locations.py``). ``--post-locations`` writes
 for real, otherwise the planned writes go to ``outbox/``. This runs after the emails and
 before the comment form.
 
@@ -164,6 +165,9 @@ DEFAULT_STALE_HOURS = 4.0
 #: load reads "no GPS pings" exactly when the link shows an empty table. (A wider window
 #: turned up pings from before the pickup on loads whose link showed nothing, 2026-11-06.)
 DEFAULT_GPS_DAYS = 2
+#: A GPS-link ping older than this counts like no ping for the locations: MacroPoint's latest
+#: location is used instead (the user's choice, 2026-11-12: 4 hours, the same line as "stale").
+DEFAULT_GPS_FALLBACK_HOURS = 4.0
 #: A load that stays stale is alerted again after this long.
 DEFAULT_REPEAT_HOURS = 4.0
 DEFAULT_STATUSES = ("Dispatched",)
@@ -515,6 +519,22 @@ def screen_loads(grid: Grid, *, statuses: tuple[str, ...] | list[str],
             continue
         out.append(load)
     return out
+
+
+def split_by_gps_age(loads: list[GpsLoad], now: datetime, fallback_hours: float = DEFAULT_GPS_FALLBACK_HOURS
+                     ) -> tuple[list[GpsLoad], list[GpsLoad]]:
+    """``(gps_link, macropoint)``: the loads whose GPS-link ping is at most ``fallback_hours``
+    old, and the loads with no ping at all or only older ones (those use MacroPoint). A load
+    whose GPS page could not be read is in neither."""
+
+    gps_link: list[GpsLoad] = []
+    macropoint: list[GpsLoad] = []
+    for load in loads:
+        if load.tracking == UNKNOWN:
+            continue
+        since = load.hours_since_ping(now)
+        (gps_link if since is not None and since <= fallback_hours else macropoint).append(load)
+    return gps_link, macropoint
 
 
 def plan_cargotel_locations(loads: list[GpsLoad], state: LocationState) -> list[LocationPlan]:
@@ -1831,6 +1851,7 @@ def run_once(
     mp_same_place_hours: float = MP_SAME_PLACE_HOURS,
     mp_match_phone: bool = True,
     mp_comments: bool = True,
+    gps_fallback_hours: float = DEFAULT_GPS_FALLBACK_HOURS,
     max_gps: int = DEFAULT_MAX_GPS,
     save_gps: str | None = None,
     redirect_to: list[str] | None = None,
@@ -1990,8 +2011,9 @@ def run_once(
     if mp_pings is not None:
         state_l = location_state if location_state is not None else LocationState(None)
         located = loads + extra
-        ct_plans = plan_cargotel_locations(located, state_l)
-        no_ping = [l for l in located if l.tracking == NEVER]
+        # a GPS-link ping within gps_fallback_hours (4) wins; older than that, or none, falls back to MacroPoint
+        recent, no_ping = split_by_gps_age(located, now, gps_fallback_hours)
+        ct_plans = plan_cargotel_locations(recent, state_l)
         mp_plans, skipped = plan_locations(no_ping, mp_pings, state_l, now, max_age_hours=mp_max_age_hours,
                                            same_place_hours=mp_same_place_hours, match_phone=mp_match_phone)
         plans = ct_plans + mp_plans
@@ -2040,6 +2062,7 @@ def run_once(
                     else re.sub(r"[\d.]+ h old", "N h old", why))
             reasons[head] = reasons.get(head, 0) + 1
         log(f"locations: {len(located)} loads, {len(ct_plans)} from a GPS-link ping, {len(no_ping)} with no GPS-link ping "
+            f"within {gps_fallback_hours:g} h "
             f"({loc['on_macropoint']} of them on MacroPoint, {len(mp_plans)} to write from it); {loc['written']} written, "
             f"{loc['failed']} failed; MacroPoint skipped: "
             + (", ".join(f"{n} {why}" for why, n in sorted(reasons.items(), key=lambda kv: -kv[1])) or "none"))
@@ -2151,6 +2174,8 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
                         help="write a MacroPoint ping only while it is at most this old (default 48, the GPS link's window)")
     parser.add_argument("--mp-same-place-hours", type=float, default=MP_SAME_PLACE_HOURS,
                         help="re-write an unchanged MacroPoint place only after this long (default 0: every new ping)")
+    parser.add_argument("--gps-fallback-hours", type=float, default=DEFAULT_GPS_FALLBACK_HOURS,
+                        help="a GPS-link ping older than this counts like no ping: MacroPoint's latest location is used (default 4)")
     parser.add_argument("--no-mp-comments", action="store_true",
                         help="do not also post the MacroPoint place as a dispatch comment labelled (MacroPoint)")
     parser.add_argument("--mp-no-phone-match", action="store_true",
@@ -2265,7 +2290,7 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
         mp_pings=load_pings(args.macropoint_dir) if args.macropoint_dir else None,
         location_state=LocationState(args.location_state), location_writer=location_writer, post_locations=args.post_locations,
         mp_max_age_hours=args.mp_max_age_hours, mp_same_place_hours=args.mp_same_place_hours, mp_match_phone=not args.mp_no_phone_match,
-        mp_comments=not args.no_mp_comments,
+        mp_comments=not args.no_mp_comments, gps_fallback_hours=args.gps_fallback_hours,
         save_gps=save_gps,
         redirect_to=redirect_to, only_rep=args.only_rep, only_loads=only_loads, checkpoint=checkpoint, log=log,
     )
