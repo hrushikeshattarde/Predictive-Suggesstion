@@ -141,6 +141,20 @@ loads with issues (41 with no GPS pings, 11 quiet for more than 11 h)`. A run at
 11 h, 57 fine; Kingbee 26, Stellantis 10, Enterprise Utah 5, Kar Korner 5, ...; Victoria
 Storm 20, Juan Bernal 13, Kyle Link 5, ...
 
+### Steady pinging before a quiet spell is not a report issue (since 2026-11-12 16:26 ET)
+
+Asked for by the operations team on 2026-11-12: load 356838 was listed as quiet for more than
+11 hours while its driver was at home for the night after pinging every 5 to 15 minutes all
+evening. A load quiet for more than 11 hours is now counted as without issues, and named in a
+"Not counted as issues" line instead of the quiet list, when its GPS link shows **at least 5
+pings in the past 16 hours, none more than 3 hours apart** (`--report-steady-hours`,
+`--report-steady-pings`, `--report-steady-gap-hours`; `TRACK_REPORT_STEADY_*`; hours `0` turns
+it off). The report's intro sentence states the rule. Replayed on the 11:00 report of
+2026-11-12 it would have taken 17 of the 70 quiet loads off the list (356838 among them: 16
+pings between 19:00 and 20:56 on 11/11); the 42 quiet loads with no ping at all in the 16
+hours, the 10 with one to three pings and one with a five-hour hole stay. In the afternoon it
+takes few (one at 16:22), since overnight drivers are back on the road by then.
+
 ### Alerts off, comments and report on (since 2026-11-09 14:40 ET)
 
 At the user's request the hourly emails to the reps are switched off: `deploy.ps1 -Send

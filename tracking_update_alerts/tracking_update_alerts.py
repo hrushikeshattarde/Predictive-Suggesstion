@@ -200,6 +200,13 @@ DEFAULT_REPORT_TO = (
 )
 DEFAULT_REPORT_HOURS: tuple[int, ...] | str = (7, 11, 15, 18)
 DEFAULT_REPORT_QUIET_HOURS = 11.0
+#: A load quiet for more than DEFAULT_REPORT_QUIET_HOURS is still not an issue when its driver
+#: pinged steadily in the past 16 hours: at least 5 pings, none more than 3 hours apart (a
+#: driver who drove all evening and parked for the night). The operations team's request,
+#: 2026-11-12, after 356838 was listed while its driver was at home.
+DEFAULT_REPORT_STEADY_HOURS = 16.0
+DEFAULT_REPORT_STEADY_PINGS = 5
+DEFAULT_REPORT_STEADY_GAP_HOURS = 3.0
 #: Statuses scanned for the report only (no comments, no alerts): the In-Route loads on
 #: the same screen, asked for on 2026-11-09.
 DEFAULT_REPORT_STATUSES = ("In-Route",)
@@ -1259,26 +1266,70 @@ def _report_key(load: GpsLoad) -> tuple[Any, ...]:
     return ((load.customer or "~").lower(), load.customer_id, load.dispatch_key or "~", load.pickup_eta or datetime.max, load.load_id)
 
 
-def report_loads(loads: list[GpsLoad], now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS) -> tuple[list[GpsLoad], list[GpsLoad]]:
+@dataclass(frozen=True)
+class SteadyRule:
+    """A driver "pinged steadily" in the last ``hours`` when the GPS link has at least
+    ``pings`` pings in them, none more than ``gap_hours`` apart. ``hours=0`` switches it off."""
+
+    hours: float = DEFAULT_REPORT_STEADY_HOURS
+    pings: int = DEFAULT_REPORT_STEADY_PINGS
+    gap_hours: float = DEFAULT_REPORT_STEADY_GAP_HOURS
+
+    def applies(self, load: GpsLoad, now: datetime) -> bool:
+        if self.hours <= 0:
+            return False
+        start = now - timedelta(hours=self.hours)
+        recent = sorted(p.when for p in load.pings if start <= p.when <= now)
+        if len(recent) < max(self.pings, 1):
+            return False
+        return all((b - a).total_seconds() <= self.gap_hours * 3600 for a, b in zip(recent, recent[1:]))
+
+    def describe(self) -> str:
+        return f"at least {self.pings} pings in the past {self.hours:g} hours, none more than {self.gap_hours:g} hours apart"
+
+
+DEFAULT_STEADY = SteadyRule()
+
+
+def is_quiet(load: GpsLoad, now: datetime, quiet_hours: float) -> bool:
+    return load.tracking in (ACTIVE, STALE) and (load.hours_since_ping(now) or 0.0) > quiet_hours
+
+
+def report_loads(loads: list[GpsLoad], now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
+                 steady: SteadyRule | None = DEFAULT_STEADY) -> tuple[list[GpsLoad], list[GpsLoad]]:
     """``(never, quiet)`` for the report: the loads with no ping in the GPS window, and the
     loads whose driver pinged but not within ``quiet_hours`` (its own threshold, apart from
-    the 4 h one the alerts use). Both sorted by customer, dispatch rep, pickup ETA."""
+    the 4 h one the alerts use), minus those who pinged steadily in the past 16 hours
+    (``steady``). Both sorted by customer, dispatch rep, pickup ETA."""
 
     never = [l for l in loads if l.tracking == NEVER]
-    quiet = [l for l in loads if l.tracking in (ACTIVE, STALE) and (l.hours_since_ping(now) or 0.0) > quiet_hours]
+    quiet = [l for l in loads if report_bucket(l, now, quiet_hours, steady) == QUIET]
     return sorted(never, key=_report_key), sorted(quiet, key=_report_key)
 
 
-def report_bucket(load: GpsLoad, now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS) -> str:
+def report_bucket(load: GpsLoad, now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
+                  steady: SteadyRule | None = DEFAULT_STEADY) -> str:
     """How the report counts a load: ``never`` (no ping in the window), ``quiet`` (last
-    ping older than ``quiet_hours``), ``ok`` (pinged within them) or ``unknown`` (GPS page
+    ping older than ``quiet_hours`` and no steady pinging in the past 16 hours), ``ok``
+    (pinged within them, or quiet after steady pinging) or ``unknown`` (GPS page
     unreadable). ``never`` and ``quiet`` are the "issues"."""
 
     if load.tracking == UNKNOWN:
         return UNKNOWN
     if load.tracking == NEVER:
         return NEVER
-    return QUIET if (load.hours_since_ping(now) or 0.0) > quiet_hours else OK
+    if is_quiet(load, now, quiet_hours) and not (steady and steady.applies(load, now)):
+        return QUIET
+    return OK
+
+
+def steady_quiet_loads(loads: list[GpsLoad], now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
+                       steady: SteadyRule | None = DEFAULT_STEADY) -> list[GpsLoad]:
+    """The loads quiet for more than ``quiet_hours`` that the steady rule takes off the list."""
+
+    if not steady:
+        return []
+    return sorted((l for l in loads if is_quiet(l, now, quiet_hours) and steady.applies(l, now)), key=_report_key)
 
 
 QUIET = "quiet"
@@ -1314,7 +1365,8 @@ def _status_groups(loads: list[GpsLoad], status_order: tuple[str, ...] | list[st
 
 
 def report_breakdowns(loads: list[GpsLoad], now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
-                      status_order: tuple[str, ...] | list[str] = DEFAULT_STATUSES + DEFAULT_REPORT_STATUSES) -> dict[str, Any]:
+                      status_order: tuple[str, ...] | list[str] = DEFAULT_STATUSES + DEFAULT_REPORT_STATUSES,
+                      steady: SteadyRule | None = DEFAULT_STEADY) -> dict[str, Any]:
     """The counts behind the report. ``"statuses"``: the status labels in order;
     ``"status"``: ``[(status, tally)]`` plus ``("All", tally)``; ``"customer"`` and
     ``"dispatch_rep"``: ``[(label, {status: tally}, all_tally)]``, the most issues first.
@@ -1327,7 +1379,7 @@ def report_breakdowns(loads: list[GpsLoad], now: datetime, quiet_hours: float = 
     for label, members in groups:
         tally = _tally()
         for load in members:
-            bucket = report_bucket(load, now, quiet_hours)
+            bucket = report_bucket(load, now, quiet_hours, steady)
             _tally_add(tally, bucket)
             _tally_add(total, bucket)
         by_status.append((label, tally))
@@ -1340,7 +1392,7 @@ def report_breakdowns(loads: list[GpsLoad], now: datetime, quiet_hours: float = 
                 k = key(load)
                 if k not in rows:
                     rows[k] = (label_of(load), {s: _tally() for s in statuses}, _tally())
-                bucket = report_bucket(load, now, quiet_hours)
+                bucket = report_bucket(load, now, quiet_hours, steady)
                 _tally_add(rows[k][1][label], bucket)
                 _tally_add(rows[k][2], bucket)
         out[name] = sorted(rows.values(), key=lambda r: (-_issues(r[2]), -r[2]["scanned"], r[0].lower()))
@@ -1529,6 +1581,7 @@ def compose_report(
     exclude_customers: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_CUSTOMERS,
     counts: dict[str, int] | None = None,
     alerts_on: bool = True,
+    steady: SteadyRule | None = DEFAULT_STEADY,
 ) -> Email:
     """The report for the operations manager: the whole screen at a glance. ``loads`` are
     the alert loads (``statuses``) plus the report-only ones (``report_statuses``, In-Route),
@@ -1537,10 +1590,11 @@ def compose_report(
     pings and every load whose driver has been quiet for more than ``quiet_hours``,
     listed by customer and dispatch rep. Plain text and HTML."""
 
-    never, quiet = report_loads(loads, now, quiet_hours)
+    never, quiet = report_loads(loads, now, quiet_hours, steady)
+    rested = steady_quiet_loads(loads, now, quiet_hours, steady)
     unknown = [l for l in loads if l.tracking == UNKNOWN]
     hours = f"{quiet_hours:g}"
-    breakdown = report_breakdowns(loads, now, quiet_hours, tuple(statuses) + tuple(report_statuses))
+    breakdown = report_breakdowns(loads, now, quiet_hours, tuple(statuses) + tuple(report_statuses), steady)
     total = breakdown["status"][-1][1]
     show_unknown = total[UNKNOWN] > 0
     cutoff = eta_cutoff(now, days_ahead)
@@ -1562,7 +1616,9 @@ def compose_report(
     scanned_desc = " and ".join(f"{t['scanned']} {label}" for label, t in breakdown["status"][:-1]) + " loads"
     intro = (f"GPS tracking report as of {_fmt_when(now)}: {SEARCH_NAME} ({SEARCH_PATH}) shows {scanned_desc} with a pickup ETA "
              f"before {cutoff:%m/%d/%Y}{excluded}. Each load's GPS history (its \"GPS City/St Link\") was checked over the last "
-             f"{gps_days} days; a load has an issue when it has no ping at all or its last ping is older than {hours} hours. The "
+             f"{gps_days} days; a load has an issue when it has no ping at all or its last ping is older than {hours} hours"
+             + (f" (unless the driver pinged steadily before that: {steady.describe()})" if steady and steady.hours > 0 else "")
+             + ". The "
              f"tracking rate is the share of the scanned loads without an issue.")
     sections = [
         ("No GPS pings", never, f"No position from the tracking app in the last {gps_days} days.", False),
@@ -1586,6 +1642,9 @@ def compose_report(
     text_parts += ["BY DISPATCH REP"] + _tally_table_text("dispatch rep", by_rep, hours, show_unknown, total=True) + [""]
     for title, members, hint, _with_ping in sections:
         text_parts += _report_text_section(title, members, now, hint)
+    if rested and steady:
+        text_parts += [f"NOT COUNTED AS ISSUES ({len(rested)}): quiet for more than {hours} h, but the driver pinged steadily before "
+                       f"that ({steady.describe()}), e.g. parked for the night: " + ", ".join(l.load_id for l in rested), ""]
     if unknown:
         text_parts += [f"GPS PAGE UNREADABLE ({len(unknown)}): " + ", ".join(l.load_id for l in unknown), ""]
     text_parts.append(trailer)
@@ -1598,6 +1657,10 @@ def compose_report(
     for title, members, hint, with_ping in sections:
         blocks.append(f'<h3 style="margin:20px 0 2px">{esc(title)} ({len(members)})</h3><p style="margin:0 0 6px;color:#444">{esc(hint)}</p>'
                       + (_report_html_table(members, now, with_ping=with_ping) if members else "<p>none</p>"))
+    if rested and steady:
+        blocks.append(f'<p style="color:#444">Not counted as issues ({len(rested)}): quiet for more than {esc(hours)} h, but the driver '
+                      f"pinged steadily before that ({esc(steady.describe())}), e.g. parked for the night: "
+                      + ", ".join(f'<a href="{esc(l.url)}">{esc(l.load_id)}</a>' for l in rested) + "</p>")
     if unknown:
         blocks.append(f'<p style="color:#444">GPS page unreadable ({len(unknown)}): '
                       + ", ".join(f'<a href="{esc(l.url)}">{esc(l.load_id)}</a>' for l in unknown) + "</p>")
@@ -1840,6 +1903,7 @@ def run_once(
     report_to: list[str] | tuple[str, ...] = DEFAULT_REPORT_TO,
     report_hours: tuple[int, ...] | str = DEFAULT_REPORT_HOURS,
     report_quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
+    report_steady: SteadyRule | None = DEFAULT_STEADY,
     report_statuses: tuple[str, ...] | list[str] = DEFAULT_REPORT_STATUSES,
     force_report: bool = False,
     send_alerts: bool = True,
@@ -1966,11 +2030,13 @@ def run_once(
         log(f"report: already sent at {state.report.get('at')}; skipped")
     elif due:
         scanned = loads + extra
-        never, quiet = report_loads(scanned, now, report_quiet_hours)
-        tallies = report_breakdowns(scanned, now, report_quiet_hours, tuple(statuses) + tuple(report_statuses))["status"]
+        never, quiet = report_loads(scanned, now, report_quiet_hours, report_steady)
+        rested = steady_quiet_loads(scanned, now, report_quiet_hours, report_steady)
+        tallies = report_breakdowns(scanned, now, report_quiet_hours, tuple(statuses) + tuple(report_statuses), report_steady)["status"]
         email = compose_report(scanned, now=now, to=list(report_to), reps=reps, quiet_hours=report_quiet_hours, gps_days=gps_days,
                                days_ahead=days_ahead, statuses=statuses, report_statuses=report_statuses, exclude_customers=exclude_customers,
-                               counts={"excluded": counts["excluded"] + extra_counts["excluded"]}, alerts_on=send_alerts)
+                               counts={"excluded": counts["excluded"] + extra_counts["excluded"]}, alerts_on=send_alerts,
+                               steady=report_steady)
         if redirect_to:
             email = redirect(email, redirect_to)
         try:
@@ -1984,7 +2050,8 @@ def run_once(
             log("report: " + "; ".join(f"{label} {t['scanned']} scanned, {t[NEVER] + t[QUIET]} with issues, {t[OK]} without"
                                        + (f", {t[UNKNOWN]} unreadable" if t[UNKNOWN] else "") for label, t in tallies))
             entry = {"at": now.isoformat(timespec="seconds"), "report": True, "to": email.to, "cc": email.cc, "subject": email.subject,
-                     "never": [l.load_id for l in never], "quiet": [l.load_id for l in quiet], "scanned": {label: t for label, t in tallies},
+                     "never": [l.load_id for l in never], "quiet": [l.load_id for l in quiet],
+                     "steady_not_counted": [l.load_id for l in rested], "scanned": {label: t for label, t in tallies},
                      "message_id": message_id, "sent": record, "redirected_to": list(redirect_to) if redirect_to else None}
             summary["report"] = entry
             if record:
@@ -2161,6 +2228,12 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
                         metavar="H[,H]|all|never", help="the run(s) that send the report, by hour of day (default 7,11,15,18: the 07:00, 11:00, 15:00 and 18:00 ET runs)")
     parser.add_argument("--report-quiet-hours", type=float, default=DEFAULT_REPORT_QUIET_HOURS,
                         help="the report lists the drivers quiet for longer than this (default 11)")
+    parser.add_argument("--report-steady-hours", type=float, default=DEFAULT_REPORT_STEADY_HOURS,
+                        help="a quiet load is not an issue when its driver pinged steadily in this many past hours (default 16; 0 = off)")
+    parser.add_argument("--report-steady-pings", type=int, default=DEFAULT_REPORT_STEADY_PINGS,
+                        help="pings needed in those hours to count as steady (default 5)")
+    parser.add_argument("--report-steady-gap-hours", type=float, default=DEFAULT_REPORT_STEADY_GAP_HOURS,
+                        help="largest gap between those pings that still counts as steady (default 3)")
     parser.add_argument("--report-status", default=",".join(DEFAULT_REPORT_STATUSES), metavar="STATUS[,...]",
                         help="statuses scanned for the report only, no comments or alerts (default In-Route; \"\" for none)")
     parser.add_argument("--report", action="store_true", help="send the report this run whatever the hour (with --redirect-to for a look first)")
@@ -2286,6 +2359,7 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
         escalate=_addresses(args.escalate_to),
         default_manager=_addresses(args.default_manager), report_to=report_to, report_hours=report_hours,
         report_quiet_hours=args.report_quiet_hours, report_statuses=report_statuses, force_report=args.report,
+        report_steady=SteadyRule(args.report_steady_hours, args.report_steady_pings, args.report_steady_gap_hours),
         send_alerts=not args.no_alerts, max_gps=args.max_gps,
         mp_pings=load_pings(args.macropoint_dir) if args.macropoint_dir else None,
         location_state=LocationState(args.location_state), location_writer=location_writer, post_locations=args.post_locations,

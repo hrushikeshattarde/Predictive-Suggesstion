@@ -4,6 +4,7 @@ like the live one (inside its Menu_alt form, with the Dispatch Comment (Add) box
 the extra rep/customer columns the job asks for), the GPS pages are synthetic ping
 tables, and the transport and the comment poster record what they were given."""
 
+import copy
 import json
 import os
 import shutil
@@ -33,6 +34,7 @@ from tracking_update_alerts import (  # noqa: E402
     AlertState,
     CommentState,
     Ping,
+    SteadyRule,
     build_comment_post,
     check_gps,
     classify,
@@ -59,6 +61,7 @@ from tracking_update_alerts import (  # noqa: E402
     report_bucket,
     report_due,
     report_loads,
+    steady_quiet_loads,
     run_once,
     select_loads,
     verify_comments,
@@ -838,6 +841,67 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("unreadable", email.text)
         self.assertIn("100.00%", email.text)
         self.assertEqual(email.load_ids, [])
+
+class SteadyRuleTests(unittest.TestCase):
+    """A load quiet for more than 11 h is not a report issue when its driver pinged steadily in the
+    past 16 h: at least 5 pings, none more than 3 h apart (the operations team's example: 356838,
+    pinging every 5 to 15 minutes all evening, then at home for the night)."""
+
+    def loads(self, *ping_sets):
+        base = by_id(checked_loads()[0])["352243"]  # a quiet load (last ping 19 h before NOW)
+        out = []
+        for n, minutes_ago in enumerate(ping_sets):
+            load = copy.copy(base)
+            load.load_id = f"9000{n}"
+            load.pings = [Ping(when=NOW - timedelta(minutes=m), where="Joliet, IL", who="Driver", stamp="x") for m in sorted(minutes_ago, reverse=True)]
+            out.append(load)
+        return out
+
+    def test_rule(self):
+        steady, few, gappy, old = self.loads(
+            range(13 * 60, 15 * 60 + 1, 10),            # every 10 min from 15 h to 13 h ago, then nothing: parked
+            [13 * 60, 14 * 60],                          # only 2 pings in the 16 h
+            [11 * 60 + 10, 11 * 60 + 20, 11 * 60 + 30, 15 * 60 + 10, 15 * 60 + 20, 15 * 60 + 30],  # a 4 h hole
+            range(17 * 60, 20 * 60, 10),                 # steady, but 17 to 20 h ago: nothing in the 16 h
+        )
+        rule = SteadyRule()
+        self.assertEqual([rule.applies(l, NOW) for l in (steady, few, gappy, old)], [True, False, False, False])
+        self.assertEqual([report_bucket(l, NOW) for l in (steady, few, gappy, old)], ["ok", "quiet", "quiet", "quiet"])
+        never, quiet = report_loads([steady, few, gappy, old], NOW)
+        self.assertEqual(sorted(l.load_id for l in quiet), sorted([few.load_id, gappy.load_id, old.load_id]))
+        self.assertEqual([l.load_id for l in steady_quiet_loads([steady, few, gappy, old], NOW)], [steady.load_id])
+        # switched off, or stricter
+        self.assertEqual(report_bucket(steady, NOW, steady=SteadyRule(0)), "quiet")
+        self.assertEqual(report_bucket(steady, NOW, steady=None), "quiet")
+        self.assertEqual(report_bucket(gappy, NOW, steady=SteadyRule(gap_hours=5)), "ok")
+        self.assertEqual(report_bucket(steady, NOW, steady=SteadyRule(pings=20)), "quiet")
+        # a driver who pinged within 11 h is fine either way
+        recent, = self.loads([30, 40])
+        self.assertEqual(report_bucket(recent, NOW), "ok")
+        self.assertEqual(steady_quiet_loads([recent], NOW), [])
+
+    def test_report_text_counts_and_lists_them(self):
+        steady, few = self.loads(range(13 * 60, 15 * 60 + 1, 10), [13 * 60, 14 * 60])
+        email = compose_report([steady, few], now=NOW, to=["justice.cromwell@circledelivers.com"], reps=REPS)
+        self.assertIn("unless the driver pinged steadily before that: at least 5 pings in the past 16 hours, none more than 3 hours apart",
+                      email.text)
+        self.assertIn(f"NOT COUNTED AS ISSUES (1): quiet for more than 11 h, but the driver pinged steadily before that", email.text)
+        self.assertIn(f"e.g. parked for the night: {steady.load_id}", email.text)
+        self.assertEqual(email.load_ids, [few.load_id])  # only the other one is listed as quiet
+        self.assertIn("GPS tracking report Fri 11/06 09:00: 1 of 2 loads with issues (1 quiet for more than 11 h)", email.subject)
+        self.assertIn(f"Not counted as issues (1)", email.html)
+        email = compose_report([steady, few], now=NOW, to=["x@y.com"], reps=REPS, steady=SteadyRule(0))
+        self.assertNotIn("NOT COUNTED", email.text)
+        self.assertNotIn("unless the driver pinged steadily", email.text)
+        self.assertIn("2 of 2 loads with issues", email.subject)
+
+    def test_lambda_and_cli_settings(self):
+        args = tracking_update_lambda.alert_args("/w", {"TRACK_REPORT_STEADY_HOURS": "0", "TRACK_REPORT_STEADY_PINGS": "8",
+                                                        "TRACK_REPORT_STEADY_GAP_HOURS": "2"})
+        self.assertEqual([args[args.index(o) + 1] for o in ("--report-steady-hours", "--report-steady-pings", "--report-steady-gap-hours")],
+                         ["0", "8", "2"])
+        self.assertNotIn("--report-steady-hours", tracking_update_lambda.alert_args("/w", {}))
+
 
 class RunTests(unittest.TestCase):
     def setUp(self):

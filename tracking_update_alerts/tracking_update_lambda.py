@@ -33,6 +33,8 @@ Environment variables::
     TRACK_REPORT_HOURS      Eastern hour(s) whose run sends the report: "7,11,15,18" (default), "8", "all", "-" (never)
     TRACK_REPORT_QUIET_HOURS  the report lists drivers quiet for longer than this (default 11)
     TRACK_REPORT_STATUS     statuses scanned for the report only, no comments or alerts (default In-Route; "-" for none)
+    TRACK_REPORT_STEADY_HOURS / _PINGS / _GAP_HOURS  a quiet load is not a report issue when its driver pinged steadily:
+                            at least _PINGS pings in the past _HOURS, none more than _GAP_HOURS apart (16 / 5 / 3; hours 0 = off)
     TRACK_SAVE_PAGES        "1" archives the fetched pages
     TRACK_MACROPOINT_PREFIX where macropoint_webhook keeps the newest ping per load (default macropoint/latest/; "-" = off)
     TRACK_POST_LOCATIONS    "1" writes the locations (GPS-link ping, else MacroPoint) into Location/ETA; otherwise outbox/
@@ -116,6 +118,10 @@ def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | Non
             args += [option, "" if env[name].strip() == "-" else env[name]]
     if env.get("TRACK_REPORT_QUIET_HOURS"):
         args += ["--report-quiet-hours", env["TRACK_REPORT_QUIET_HOURS"]]
+    for option, name in (("--report-steady-hours", "TRACK_REPORT_STEADY_HOURS"), ("--report-steady-pings", "TRACK_REPORT_STEADY_PINGS"),
+                         ("--report-steady-gap-hours", "TRACK_REPORT_STEADY_GAP_HOURS")):
+        if env.get(name):
+            args += [option, env[name]]
     if isinstance(event, Mapping) and str(event.get("report", "")).strip().lower() in ("1", "true", "yes", "on"):
         args.append("--report")
     if flag(env, "TRACK_SEND"):
