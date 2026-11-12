@@ -71,6 +71,8 @@ param(
     [int]$TimeoutSeconds = 900,
     [switch]$Send,
     [switch]$PostComments,
+    # Write the MacroPoint places (from macropoint_webhook) into CargoTel's Location/ETA.
+    [switch]$PostLocations,
     # No hourly emails to the reps; the comments and the report carry on (the user's choice, 2026-11-09).
     [switch]$NoAlerts,
     [switch]$SavePages,
@@ -94,7 +96,7 @@ $SharedModules = @("lambda_handler.py", "dispatch_watcher.py", "send_drafts.py",
                    "cargotel_search.py", "bedrock_email.py", "gmail_send.py", "pull_load_detail.py")
 # The email plumbing (transports, test-copy redirect) comes from the due-date job.
 $SiblingModules = @("due_date_alerts\due_date_alerts.py")
-$OwnModules = @("tracking_update_alerts.py", "tracking_update_lambda.py")
+$OwnModules = @("tracking_update_alerts.py", "tracking_update_lambda.py", "macropoint_locations.py")
 
 function Invoke-Aws {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$CliArgs)
@@ -208,6 +210,7 @@ $vars["TRACK_POST_COMMENTS"] = "0"; if ($PostComments) { $vars["TRACK_POST_COMME
 $vars["TRACK_SAVE_PAGES"] = "0";    if ($SavePages) { $vars["TRACK_SAVE_PAGES"] = "1" }
 $vars["TRACK_PAUSED"] = "0";        if ($Paused) { $vars["TRACK_PAUSED"] = "1" }
 $vars["TRACK_ALERTS"] = "1";        if ($NoAlerts) { $vars["TRACK_ALERTS"] = "0" }
+$vars["TRACK_POST_LOCATIONS"] = "0"; if ($PostLocations) { $vars["TRACK_POST_LOCATIONS"] = "1" }
 $vars["TRACK_DAYS_AHEAD"] = [string]$DaysAhead
 $vars["TRACK_STALE_HOURS"] = [string]$StaleHours
 $vars["TRACK_GPS_DAYS"] = [string]$GpsDays
@@ -276,6 +279,8 @@ if ($existing -eq $FunctionName) {
 # ---------------------------------------------------------------- summary
 $sendState = "OFF (emails go to s3://$Bucket/$($Prefix)outbox/)"
 if ($Send) { $sendState = "ON via SES as $MailFrom" }
+$locationState = "OFF (planned MacroPoint locations go to the outbox)"
+if ($PostLocations) { $locationState = "ON (MacroPoint places written into Location/ETA)" }
 $commentState = "OFF (planned comments go to the outbox)"
 if ($PostComments) { $commentState = "ON (written into CargoTel)" }
 Write-Host ""
@@ -283,6 +288,7 @@ $reportTo = "Justice Cromwell, stellantisob@, Brett Booth, Podge Ormsby, Mitchel
 if ($ReportTo) { $reportTo = $ReportTo }
 $alertState = "ON (hourly emails to the reps)"
 if ($NoAlerts) { $alertState = "OFF (no emails to the reps; comments and report only)" }
+Write-Host "MacroPoint locations: $locationState"
 Write-Host "done. sending $sendState; alerts $alertState; comments $commentState; stale after $StaleHours h; GPS window $GpsDays d; repeat after $RepeatHours h; paused $($Paused.IsPresent)"
 Write-Host "report: run hour(s) $ReportHours ET -> $reportTo; lists drivers quiet > $ReportQuietHours h and loads never pinged; also scans $ReportStatus"
 Write-Host "run one pass now:"

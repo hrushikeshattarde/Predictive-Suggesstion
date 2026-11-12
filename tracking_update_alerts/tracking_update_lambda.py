@@ -34,6 +34,12 @@ Environment variables::
     TRACK_REPORT_QUIET_HOURS  the report lists drivers quiet for longer than this (default 11)
     TRACK_REPORT_STATUS     statuses scanned for the report only, no comments or alerts (default In-Route; "-" for none)
     TRACK_SAVE_PAGES        "1" archives the fetched pages
+    TRACK_MACROPOINT_PREFIX where macropoint_webhook keeps the newest ping per load (default macropoint/latest/; "-" = off)
+    TRACK_POST_LOCATIONS    "1" writes the MacroPoint places into CargoTel's Location/ETA; otherwise they go to outbox/
+    TRACK_MP_MAX_AGE_HOURS  write a MacroPoint ping only while it is at most this old (default 3)
+    TRACK_MP_SAME_PLACE_HOURS  re-write an unchanged place only after this long (default 3)
+    TRACK_MP_PHONE_MATCH    "0" writes even when MacroPoint's phone differs from the CargoTel driver cell
+    TRACK_MP_COMMENTS       "0" stops also posting the MacroPoint place as a dispatch comment labelled (MacroPoint)
     TRACK_WORKDIR           scratch folder (default /tmp/tracking-alerts)
     MAIL_FROM               verified SES sender (default the vehicles@ group)
     SES_CONFIGURATION_SET   SES configuration set for bounce/complaint events
@@ -49,7 +55,7 @@ import os
 import shutil
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +71,9 @@ DEFAULT_WORKDIR = "/tmp/tracking-alerts"
 DEFAULT_BUCKET = "circle-reload-suggestions"
 DEFAULT_PREFIX = "tracking-alerts/"
 CONFIG_PREFIX = "config/"
+DEFAULT_MACROPOINT_PREFIX = "macropoint/latest/"
+#: Only pings this recent are copied down; the job writes pings at most 3 h old anyway.
+MACROPOINT_COPY_HOURS = 24
 
 
 def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | None = None) -> list[str]:
@@ -79,7 +88,19 @@ def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | Non
         "--stale-hours", env.get("TRACK_STALE_HOURS", str(int(tracking_update_alerts.DEFAULT_STALE_HOURS))),
         "--gps-days", env.get("TRACK_GPS_DAYS", str(tracking_update_alerts.DEFAULT_GPS_DAYS)),
         "--repeat-hours", env.get("TRACK_REPEAT_HOURS", str(int(tracking_update_alerts.DEFAULT_REPEAT_HOURS))),
+        "--location-state", os.path.join(work, "state", "location_state.json"),
     ]
+    if (env.get("TRACK_MACROPOINT_PREFIX") or DEFAULT_MACROPOINT_PREFIX).strip() != "-":
+        args += ["--macropoint-dir", os.path.join(work, "macropoint")]
+    if flag(env, "TRACK_POST_LOCATIONS"):
+        args.append("--post-locations")
+    for option, name in (("--mp-max-age-hours", "TRACK_MP_MAX_AGE_HOURS"), ("--mp-same-place-hours", "TRACK_MP_SAME_PLACE_HOURS")):
+        if env.get(name):
+            args += [option, env[name]]
+    if "TRACK_MP_PHONE_MATCH" in env and env["TRACK_MP_PHONE_MATCH"].strip() and not flag(env, "TRACK_MP_PHONE_MATCH"):
+        args.append("--mp-no-phone-match")
+    if "TRACK_MP_COMMENTS" in env and env["TRACK_MP_COMMENTS"].strip() and not flag(env, "TRACK_MP_COMMENTS"):
+        args.append("--no-mp-comments")
     for option, name in (("--status", "TRACK_STATUS"), ("--stellantis-to", "TRACK_STELLANTIS_TO"),
                          ("--escalate-to", "TRACK_ESCALATE_TO"), ("--default-manager", "TRACK_DEFAULT_MANAGER"),
                          ("--configuration-set", "SES_CONFIGURATION_SET")):
@@ -121,13 +142,21 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
     started = time.time()
 
     shutil.rmtree(work, ignore_errors=True)
-    for folder in ("config", "state", "outbox", "pages"):
+    for folder in ("config", "state", "outbox", "pages", "macropoint"):
         os.makedirs(os.path.join(work, folder), exist_ok=True)
     client = s3_client()
     down = {
         "config": sync_down(bucket, CONFIG_PREFIX, os.path.join(work, "config"), client=client),
         "state": sync_down(bucket, prefix + "state/", os.path.join(work, "state"), client=client),
     }
+    mp_prefix = (env.get("TRACK_MACROPOINT_PREFIX") or DEFAULT_MACROPOINT_PREFIX).strip()
+    if mp_prefix != "-":
+        try:
+            down["macropoint"] = sync_down(bucket, mp_prefix, os.path.join(work, "macropoint"), client=client,
+                                           newer_than=datetime.now(timezone.utc) - timedelta(hours=MACROPOINT_COPY_HOURS))
+        except Exception as exc:  # noqa: BLE001 - no pings is not a reason to skip the run
+            log(f"MacroPoint pings not copied: {exc}")
+            down["macropoint"] = 0
     log(f"from s3://{bucket}: " + ", ".join(f"{k}={v}" for k, v in down.items()))
 
     result: dict[str, Any] = {"bucket": bucket, "prefix": prefix, "down": down, "send": flag(env, "TRACK_SEND"),

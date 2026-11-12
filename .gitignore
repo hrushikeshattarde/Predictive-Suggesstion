@@ -63,3 +63,9 @@ sales_rep_sync/reports/
 sales_rep_sync/pages/
 sales_rep_sync/build/
 sales_rep_sync/dist/
+
+# macropoint_webhook: build output and the callback URL (it carries the secret path segment)
+macropoint_webhook/callback_url.txt
+macropoint_webhook/build/
+macropoint_webhook/dist/
+tracking_update_alerts/location_state.json

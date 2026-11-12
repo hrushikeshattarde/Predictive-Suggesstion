@@ -151,6 +151,54 @@ alerts are off). The alert state is left alone, so when the alerts come back
 (`deploy.ps1 -Send -PostComments`, without `-NoAlerts`) every load not pinging is alerted
 as if for the first time.
 
+### MacroPoint locations into Location/ETA (built 2026-11-12)
+
+Asked for on 2026-11-12: the driver-app pings are unreliable, the vehicles team tracks
+loads in MacroPoint under the CargoTel load number, and a MacroPoint ping should go into the
+load's "Current Location/ETA". `../macropoint_webhook/` receives MacroPoint's Location
+Updates callback and keeps the newest ping per load in `s3://.../macropoint/latest/`; the
+Lambda handler copies the last 24 hours of those files to `macropoint/` and the run
+(`--macropoint-dir`) writes them, right after the emails and before the comment form:
+
+- **Which loads:** every load row on the screen, Dispatched or In-Route, no pickup-ETA rule,
+  minus Merchants and bundle members.
+- **When:** the newest MacroPoint ping is at most 3 hours old (`--mp-max-age-hours`), newer
+  than the ping last written on the load (`location_state.json`), and either a different
+  place than the last write or the same place more than 3 hours later
+  (`--mp-same-place-hours`), so a parked truck is not re-written every hour.
+- **Safety:** when MacroPoint's tracked phone and the CargoTel driver cell are both phone
+  numbers they must match (`--mp-no-phone-match` turns this off); Circle's MacroPoint
+  account also tracks TransportPro loads, and the receiver keeps six-digit ids only.
+- **How it is written:** like the load page's Location/ETA function: the place goes through
+  CargoTel's own City/State/Zip lookup (`/cargotel/zipService.mcgi?action=getZip`,
+  `Forsyth, GA` -> `31029 (Forsyth, GA)`; an unknown place falls back to the zip, then is
+  skipped), then `/cargotel/db.mcgi?mode=location&load_id=...&db__location=...` with the ETA
+  left empty. CargoTel answers "Location Updated" and records a **"Location Update"**
+  comment on the load (`Location Update: FORSYTH GA 31029`).
+- **Not the Current Location column:** the screen's Current Location column is the
+  vehicle's location (for a Dispatched load, the pickup lot) and does not change.
+- **Also a dispatch comment** (asked for 2026-11-12 after the user saw the screen show
+  nothing): every place written into Location/ETA is also posted as a dispatch comment,
+  `2026-11-12 10:09:00-05 Covington, GA (MacroPoint)`, in the same comment POST as the
+  driver-app comments, so it shows in the screen's Last Dispatch Comment column. A load with
+  a new driver-app ping in the same run gets both in one comment, joined by ` | `.
+  `--no-mp-comments` / `TRACK_MP_COMMENTS=0` turn this off. Live test 10:23 ET on 354350
+  with MacroPoint's 10:09 ping: Location Update `COVINGTON GA 30014` and the comment, both
+  by ALEC STOPHER, the comment shown as the row's Last Dispatch Comment.
+
+Verified live on 2026-11-12 on load 354350 (MacroPoint ping 09:17 ET, Forsyth, GA): two
+"Location Update: FORSYTH GA 31029" entries by ALEC STOPHER at 09:46 (through the screen's
+own form) and 09:48 (through the Location/ETA popup, the route the job uses); both
+accurate, the duplicate is from the test. `--post-locations` (`TRACK_POST_LOCATIONS=1`,
+`deploy.ps1 -PostLocations`) writes for real; without it the planned writes go to
+`outbox/<stamp>_locations.txt`. Nothing is written until MacroPoint is pointed at the receiver.
+
+Deployed 2026-11-12 10:05 ET with `deploy.ps1 -Send -PostComments -NoAlerts -PostLocations`
+(`TRACK_POST_LOCATIONS=1`). The first deploy left `macropoint_locations.py` out of the zip
+(the script packs a fixed file list; fixed, redeployed 10:06 ET); a manual run at 10:06
+with a dummy ping for load 999999 in S3 logged "MacroPoint: 1 load(s) with pings on file,
+0 of them on the screen" and wrote nothing; the dummy was removed.
+
 ## Running it
 
 ```bash
