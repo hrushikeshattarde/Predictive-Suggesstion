@@ -122,6 +122,20 @@ def _phone(text: str | None) -> str:
     return d if len(d) == 10 else ""
 
 
+def macropoint_covers(load: Any, ping: MpPing | None, now: datetime, max_age_hours: float = 48.0, match_phone: bool = True) -> bool:
+    """Whether ``ping`` (MacroPoint's newest for the load) shows the load is being tracked: at
+    most ``max_age_hours`` old, not in the future, and, when MacroPoint's locator and the CargoTel
+    driver cell are both phone numbers, the same phone."""
+
+    if ping is None or ping.when is None:
+        return False
+    age_h = (now - ping.when).total_seconds() / 3600
+    if age_h > max_age_hours or age_h < -0.25:
+        return False
+    mp_phone, ct_phone = _phone(ping.locator), _phone(getattr(load, "driver_phone", ""))
+    return not (match_phone and mp_phone and ct_phone and mp_phone != ct_phone)
+
+
 class LocationState:
     """``location_state.json``: ``{"written": {load: {"ping_utc", "place", "value", "at"}}}``."""
 

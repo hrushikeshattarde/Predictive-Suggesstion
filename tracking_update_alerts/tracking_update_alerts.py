@@ -139,6 +139,7 @@ from macropoint_locations import (  # noqa: E402
     LocationWriter,
     MpPing,
     load_pings,
+    macropoint_covers,
     mp_comment_text,
     plan_locations,
     write_location_dump,
@@ -212,6 +213,9 @@ DEFAULT_REPORT_QUIET_HOURS = 11.0
 DEFAULT_REPORT_STEADY_HOURS = 16.0
 DEFAULT_REPORT_STEADY_PINGS = 5
 DEFAULT_REPORT_STEADY_GAP_HOURS = 3.0
+#: In the full report a load with no GPS-link ping is not an issue when MacroPoint has a ping for
+#: it within this many hours (the GPS link's own two days); the user's request, 2026-11-13.
+DEFAULT_REPORT_MP_HOURS = 48.0
 #: Statuses scanned for the report only (no comments, no alerts): the In-Route loads on
 #: the same screen, asked for on 2026-11-09.
 DEFAULT_REPORT_STATUSES = ("In-Route",)
@@ -1301,31 +1305,44 @@ def is_quiet(load: GpsLoad, now: datetime, quiet_hours: float) -> bool:
 
 
 def report_loads(loads: list[GpsLoad], now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
-                 steady: SteadyRule | None = DEFAULT_STEADY) -> tuple[list[GpsLoad], list[GpsLoad]]:
+                 steady: SteadyRule | None = DEFAULT_STEADY, mp_covered: dict[str, MpPing] | None = None
+                 ) -> tuple[list[GpsLoad], list[GpsLoad]]:
     """``(never, quiet)`` for the report: the loads with no ping in the GPS window, and the
     loads whose driver pinged but not within ``quiet_hours`` (its own threshold, apart from
     the 4 h one the alerts use), minus those who pinged steadily in the past 16 hours
     (``steady``). Both sorted by customer, dispatch rep, pickup ETA."""
 
-    never = [l for l in loads if l.tracking == NEVER]
+    never = [l for l in loads if report_bucket(l, now, quiet_hours, steady, mp_covered) == NEVER]
     quiet = [l for l in loads if report_bucket(l, now, quiet_hours, steady) == QUIET]
     return sorted(never, key=_report_key), sorted(quiet, key=_report_key)
 
 
 def report_bucket(load: GpsLoad, now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
-                  steady: SteadyRule | None = DEFAULT_STEADY) -> str:
+                  steady: SteadyRule | None = DEFAULT_STEADY, mp_covered: dict[str, MpPing] | None = None) -> str:
     """How the report counts a load: ``never`` (no ping in the window), ``quiet`` (last
     ping older than ``quiet_hours`` and no steady pinging in the past 16 hours), ``ok``
     (pinged within them, or quiet after steady pinging) or ``unknown`` (GPS page
-    unreadable). ``never`` and ``quiet`` are the "issues"."""
+    unreadable). ``never`` and ``quiet`` are the "issues". A load with no GPS-link ping that
+    MacroPoint is tracking (``mp_covered``) is ``ok``."""
 
     if load.tracking == UNKNOWN:
         return UNKNOWN
     if load.tracking == NEVER:
-        return NEVER
+        return OK if mp_covered and load.load_id in mp_covered else NEVER
     if is_quiet(load, now, quiet_hours) and not (steady and steady.applies(load, now)):
         return QUIET
     return OK
+
+
+def macropoint_covered(loads: list[GpsLoad], mp_pings: dict[str, MpPing] | None, now: datetime,
+                       hours: float = DEFAULT_REPORT_MP_HOURS) -> dict[str, MpPing]:
+    """``{load_id: MacroPoint ping}`` for the loads with no GPS-link ping that MacroPoint has a
+    ping for in the last ``hours`` (phone checked): the report does not list them as issues."""
+
+    if not mp_pings:
+        return {}
+    return {l.load_id: mp_pings[l.load_id] for l in loads
+            if l.tracking == NEVER and macropoint_covers(l, mp_pings.get(l.load_id), now, hours)}
 
 
 def steady_quiet_loads(loads: list[GpsLoad], now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
@@ -1371,7 +1388,7 @@ def _status_groups(loads: list[GpsLoad], status_order: tuple[str, ...] | list[st
 
 def report_breakdowns(loads: list[GpsLoad], now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
                       status_order: tuple[str, ...] | list[str] = DEFAULT_STATUSES + DEFAULT_REPORT_STATUSES,
-                      steady: SteadyRule | None = DEFAULT_STEADY) -> dict[str, Any]:
+                      steady: SteadyRule | None = DEFAULT_STEADY, mp_covered: dict[str, MpPing] | None = None) -> dict[str, Any]:
     """The counts behind the report. ``"statuses"``: the status labels in order;
     ``"status"``: ``[(status, tally)]`` plus ``("All", tally)``; ``"customer"`` and
     ``"dispatch_rep"``: ``[(label, {status: tally}, all_tally)]``, the most issues first.
@@ -1384,7 +1401,7 @@ def report_breakdowns(loads: list[GpsLoad], now: datetime, quiet_hours: float = 
     for label, members in groups:
         tally = _tally()
         for load in members:
-            bucket = report_bucket(load, now, quiet_hours, steady)
+            bucket = report_bucket(load, now, quiet_hours, steady, mp_covered)
             _tally_add(tally, bucket)
             _tally_add(total, bucket)
         by_status.append((label, tally))
@@ -1397,7 +1414,7 @@ def report_breakdowns(loads: list[GpsLoad], now: datetime, quiet_hours: float = 
                 k = key(load)
                 if k not in rows:
                     rows[k] = (label_of(load), {s: _tally() for s in statuses}, _tally())
-                bucket = report_bucket(load, now, quiet_hours, steady)
+                bucket = report_bucket(load, now, quiet_hours, steady, mp_covered)
                 _tally_add(rows[k][1][label], bucket)
                 _tally_add(rows[k][2], bucket)
         out[name] = sorted(rows.values(), key=lambda r: (-_issues(r[2]), -r[2]["scanned"], r[0].lower()))
@@ -1589,6 +1606,7 @@ def compose_report(
     counts: dict[str, int] | None = None,
     alerts_on: bool = True,
     steady: SteadyRule | None = DEFAULT_STEADY,
+    mp_covered: dict[str, MpPing] | None = None,
 ) -> Email:
     """The report for the operations manager: the whole screen at a glance. ``loads`` are
     the alert loads (``statuses``) plus the report-only ones (``report_statuses``, In-Route),
@@ -1597,11 +1615,12 @@ def compose_report(
     pings and every load whose driver has been quiet for more than ``quiet_hours``,
     listed by customer and dispatch rep. Plain text and HTML."""
 
-    never, quiet = report_loads(loads, now, quiet_hours, steady)
+    never, quiet = report_loads(loads, now, quiet_hours, steady, mp_covered)
     rested = steady_quiet_loads(loads, now, quiet_hours, steady)
+    on_mp = sorted((l for l in loads if l.tracking == NEVER and mp_covered and l.load_id in mp_covered), key=_report_key)
     unknown = [l for l in loads if l.tracking == UNKNOWN]
     hours = f"{quiet_hours:g}"
-    breakdown = report_breakdowns(loads, now, quiet_hours, tuple(statuses) + tuple(report_statuses), steady)
+    breakdown = report_breakdowns(loads, now, quiet_hours, tuple(statuses) + tuple(report_statuses), steady, mp_covered)
     total = breakdown["status"][-1][1]
     show_unknown = total[UNKNOWN] > 0
     cutoff = eta_cutoff(now, days_ahead)
@@ -1625,6 +1644,8 @@ def compose_report(
              f"before {cutoff:%m/%d/%Y}{excluded}. Each load's GPS history (its \"GPS City/St Link\") was checked over the last "
              f"{gps_days} days; a load has an issue when it has no ping at all or its last ping is older than {hours} hours"
              + (f" (unless the driver pinged steadily before that: {steady.describe()})" if steady and steady.hours > 0 else "")
+             + ("; a load with no GPS-link ping is not an issue when MacroPoint has a ping for it in the same time"
+                if mp_covered is not None else "")
              + ". The "
              f"tracking rate is the share of the scanned loads without an issue.")
     sections = [
@@ -1649,6 +1670,10 @@ def compose_report(
     text_parts += ["BY DISPATCH REP"] + _tally_table_text("dispatch rep", by_rep, hours, show_unknown, total=True) + [""]
     for title, members, hint, _with_ping in sections:
         text_parts += _report_text_section(title, members, now, hint)
+    if on_mp:
+        text_parts += [f"NOT COUNTED AS ISSUES, TRACKED IN MACROPOINT ({len(on_mp)}): no ping on the GPS link, but MacroPoint has one: "
+                       + ", ".join(f"{l.load_id} ({mp_covered[l.load_id].place}, "
+                                   f"{_local(mp_covered[l.load_id].when, now):%a %m/%d %H:%M})" for l in on_mp), ""]
     if rested and steady:
         text_parts += [f"NOT COUNTED AS ISSUES ({len(rested)}): quiet for more than {hours} h, but the driver pinged steadily before "
                        f"that ({steady.describe()}), e.g. parked for the night: " + ", ".join(l.load_id for l in rested), ""]
@@ -1664,6 +1689,11 @@ def compose_report(
     for title, members, hint, with_ping in sections:
         blocks.append(f'<h3 style="margin:20px 0 2px">{esc(title)} ({len(members)})</h3><p style="margin:0 0 6px;color:#444">{esc(hint)}</p>'
                       + (_report_html_table(members, now, with_ping=with_ping) if members else "<p>none</p>"))
+    if on_mp:
+        blocks.append(f'<p style="color:#444">Not counted as issues, tracked in MacroPoint ({len(on_mp)}): no ping on the GPS link, '
+                      "but MacroPoint has one: " + ", ".join(
+                          f'<a href="{esc(l.url)}">{esc(l.load_id)}</a> ({esc(mp_covered[l.load_id].place)}, '
+                          f"{_local(mp_covered[l.load_id].when, now):%a %m/%d %H:%M})" for l in on_mp) + "</p>")
     if rested and steady:
         blocks.append(f'<p style="color:#444">Not counted as issues ({len(rested)}): quiet for more than {esc(hours)} h, but the driver '
                       f"pinged steadily before that ({esc(steady.describe())}), e.g. parked for the night: "
@@ -2019,6 +2049,8 @@ def run_once(
     report_hours: tuple[int, ...] | str = DEFAULT_REPORT_HOURS,
     report_quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
     report_steady: SteadyRule | None = DEFAULT_STEADY,
+    report_macropoint: bool = True,
+    report_mp_hours: float = DEFAULT_REPORT_MP_HOURS,
     noping_report_to: list[str] | tuple[str, ...] = DEFAULT_NOPING_REPORT_TO,
     noping_report_hours: tuple[int, ...] | str = DEFAULT_NOPING_REPORT_HOURS,
     force_noping_report: bool = False,
@@ -2149,13 +2181,16 @@ def run_once(
         log(f"report: already sent at {state.report.get('at')}; skipped")
     elif due:
         scanned = loads + extra
-        never, quiet = report_loads(scanned, now, report_quiet_hours, report_steady)
+        mp_covered = (macropoint_covered(scanned, mp_pings, now, report_mp_hours)
+                      if (report_macropoint and mp_pings is not None) else None)
+        never, quiet = report_loads(scanned, now, report_quiet_hours, report_steady, mp_covered)
         rested = steady_quiet_loads(scanned, now, report_quiet_hours, report_steady)
-        tallies = report_breakdowns(scanned, now, report_quiet_hours, tuple(statuses) + tuple(report_statuses), report_steady)["status"]
+        tallies = report_breakdowns(scanned, now, report_quiet_hours, tuple(statuses) + tuple(report_statuses), report_steady,
+                                    mp_covered)["status"]
         email = compose_report(scanned, now=now, to=list(report_to), reps=reps, quiet_hours=report_quiet_hours, gps_days=gps_days,
                                days_ahead=days_ahead, statuses=statuses, report_statuses=report_statuses, exclude_customers=exclude_customers,
                                counts={"excluded": counts["excluded"] + extra_counts["excluded"]}, alerts_on=send_alerts,
-                               steady=report_steady)
+                               steady=report_steady, mp_covered=mp_covered)
         if redirect_to:
             email = redirect(email, redirect_to)
         try:
@@ -2170,7 +2205,8 @@ def run_once(
                                        + (f", {t[UNKNOWN]} unreadable" if t[UNKNOWN] else "") for label, t in tallies))
             entry = {"at": now.isoformat(timespec="seconds"), "report": True, "to": email.to, "cc": email.cc, "subject": email.subject,
                      "never": [l.load_id for l in never], "quiet": [l.load_id for l in quiet],
-                     "steady_not_counted": [l.load_id for l in rested], "scanned": {label: t for label, t in tallies},
+                     "steady_not_counted": [l.load_id for l in rested], "macropoint_not_counted": sorted(mp_covered or {}),
+                     "scanned": {label: t for label, t in tallies},
                      "message_id": message_id, "sent": record, "redirected_to": list(redirect_to) if redirect_to else None}
             summary["report"] = entry
             if record:
@@ -2380,6 +2416,10 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
     parser.add_argument("--noping-report-hours", default=",".join(str(h) for h in DEFAULT_NOPING_REPORT_HOURS), metavar="H[,H]|all|never",
                         help="the run(s) that send the no-ping report, by hour of day (default 7,11,15,18)")
     parser.add_argument("--noping-report", action="store_true", help="send the no-ping report this run whatever the hour")
+    parser.add_argument("--report-no-macropoint", action="store_true",
+                        help="do not take loads MacroPoint is tracking off the full report's No GPS pings list")
+    parser.add_argument("--report-mp-hours", type=float, default=DEFAULT_REPORT_MP_HOURS,
+                        help="a MacroPoint ping this recent takes a no-ping load off the full report (default 48)")
     parser.add_argument("--report-steady-hours", type=float, default=DEFAULT_REPORT_STEADY_HOURS,
                         help="a quiet load is not an issue when its driver pinged steadily in this many past hours (default 16; 0 = off)")
     parser.add_argument("--report-steady-pings", type=int, default=DEFAULT_REPORT_STEADY_PINGS,
@@ -2513,6 +2553,7 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
         default_manager=_addresses(args.default_manager), report_to=report_to, report_hours=report_hours,
         report_quiet_hours=args.report_quiet_hours, report_statuses=report_statuses, force_report=args.report,
         report_steady=SteadyRule(args.report_steady_hours, args.report_steady_pings, args.report_steady_gap_hours),
+        report_macropoint=not args.report_no_macropoint, report_mp_hours=args.report_mp_hours,
         noping_report_to=_addresses(args.noping_report_to), noping_report_hours=noping_report_hours,
         force_noping_report=args.noping_report,
         send_alerts=not args.no_alerts, max_gps=args.max_gps,

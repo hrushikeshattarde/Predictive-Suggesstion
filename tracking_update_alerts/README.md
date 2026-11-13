@@ -141,6 +141,19 @@ loads with issues (41 with no GPS pings, 11 quiet for more than 11 h)`. A run at
 11 h, 57 fine; Kingbee 26, Stellantis 10, Enterprise Utah 5, Kar Korner 5, ...; Victoria
 Storm 20, Juan Bernal 13, Kyle Link 5, ...
 
+### MacroPoint takes no-ping loads off the full report (since 2026-11-13 08:24 ET)
+
+Asked for on 2026-11-13: in the full report, a load with no ping on its GPS City/St link is
+not an issue when MacroPoint has a ping for it in the last 2 days (`--report-mp-hours`,
+`TRACK_REPORT_MP_HOURS`, default 48), with the same phone check as the Location/ETA step
+(MacroPoint's locator and the CargoTel driver cell must match when both are phone numbers).
+Such loads count as without issues and are named, with MacroPoint's latest place and time,
+in a "Not counted as issues, tracked in MacroPoint" line; the intro sentence says so. The
+quiet-for-more-than-11-h list and Stuart's short report are unchanged (the short report
+still counts them as No Pings). `--report-no-macropoint` / `TRACK_REPORT_MACROPOINT=0` turn it
+off. The Lambda handler now copies the last 48 hours of MacroPoint pings (was 24) to match.
+Nothing changes until MacroPoint's Location Updates callback is set.
+
 ### The short no-ping report for Stuart Mitchell (since 2026-11-12 16:36 ET)
 
 Asked for on 2026-11-12: a copy of the report with only No Pings, OK and the tracking rate, to

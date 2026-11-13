@@ -50,6 +50,7 @@ from tracking_update_alerts import (  # noqa: E402
     gps_params,
     grid_params,
     load_from_row,
+    macropoint_covered,
     mail_groups,
     main,
     needs_comment,
@@ -70,6 +71,7 @@ from tracking_update_alerts import (  # noqa: E402
 )
 import tracking_update_alerts  # noqa: E402
 import tracking_update_lambda  # noqa: E402
+from macropoint_locations import MpPing  # noqa: E402
 
 EST = timezone(timedelta(hours=-5))
 NOW = datetime(2026, 11, 6, 9, 0, tzinfo=EST)
@@ -921,6 +923,76 @@ class NoPingReportTests(unittest.TestCase):
         args = tracking_update_lambda.alert_args("/w", {"TRACK_NOPING_REPORT_TO": "-"}, {"report": True})
         self.assertEqual(args[args.index("--noping-report-to") + 1], "")
         self.assertNotIn("--noping-report", args)
+
+
+class MacroPointInReportTests(unittest.TestCase):
+    """The full report: a load with no GPS-link ping is not an issue when MacroPoint has a ping
+    for it in the last 2 days (phone checked); Stuart's short report is unchanged."""
+
+    @staticmethod
+    def mp(load_id, hours_ago, city="Macon", state="GA", locator=""):
+        return MpPing(load_id, (NOW - timedelta(hours=hours_ago)).astimezone(timezone.utc), city, state, "", 32.8, -83.6, locator, "Ping")
+
+    def scanned(self):
+        loads, _w, counts, _e = checked_loads()
+        extra, _w2, _c2 = select_loads(parse_grid(PAGE), NOW, statuses=("In-Route",))
+        check_gps(extra, fetch_gps, NOW)
+        return loads + extra, counts
+
+    def test_covered(self):
+        scanned, _c = self.scanned()
+        pings = {"354745": self.mp("354745", 0.3, locator="2242849908"),   # no GPS-link ping, same phone: covered
+                 "360002": self.mp("360002", 50),                           # older than 2 days: not
+                 "360008": self.mp("360008", 1, locator="9999999999"),     # another phone: not
+                 "352242": self.mp("352242", 1)}                            # has GPS-link pings: not this rule's business
+        self.assertEqual(sorted(macropoint_covered(scanned, pings, NOW)), ["354745"])
+        self.assertEqual(sorted(macropoint_covered(scanned, pings, NOW, hours=60)), ["354745", "360002"])
+        self.assertEqual(macropoint_covered(scanned, None, NOW), {})
+
+    def test_report(self):
+        scanned, counts = self.scanned()
+        covered = macropoint_covered(scanned, {"354745": self.mp("354745", 0.3, locator="2242849908")}, NOW)
+        email = compose_report(scanned, now=NOW, to=["justice.cromwell@circledelivers.com"], reps=REPS, counts=counts, mp_covered=covered)
+        self.assertEqual(email.subject, "GPS tracking report Fri 11/06 09:00: 4 of 11 loads with issues (2 with no GPS pings, 2 quiet for more than 11 h)")
+        self.assertNotIn("354745", email.load_ids)
+        self.assertIn("a load with no GPS-link ping is not an issue when MacroPoint has a ping for it in the same time", email.text)
+        self.assertIn("NOT COUNTED AS ISSUES, TRACKED IN MACROPOINT (1): no ping on the GPS link, but MacroPoint has one: "
+                      "354745 (Macon, GA, Fri 11/06 08:42)", email.text)
+        self.assertIn("NO GPS PINGS (2)", email.text)
+        self.assertIn("Not counted as issues, tracked in MacroPoint (1)", email.html)
+        # without MacroPoint data the report is as before, and says nothing about MacroPoint
+        email = compose_report(scanned, now=NOW, to=["x@y.com"], reps=REPS, counts=counts)
+        self.assertIn("5 of 11 loads with issues (3 with no GPS pings", email.subject)
+        self.assertNotIn("MacroPoint", email.text)
+        # Stuart's short report keeps counting it as no pings
+        short = compose_noping_report(scanned, now=NOW, to=["smitchell@circledelivers.com"], counts=counts)
+        self.assertIn("354745", short.load_ids)
+
+    def test_run_and_settings(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            def run(**kw):
+                transport = FakeTransport()
+                summary = run_once(PAGE, parse_grid(PAGE), now=NOW.replace(hour=11), reps=REPS, gps_fetch=fetch_gps,
+                                   state=AlertState(os.path.join(tmp, "a.json")), comment_state=CommentState(None), transport=transport,
+                                   poster=FakePoster(), from_addr="x", record=False, post_comments=False, sent_log=None,
+                                   outbox=os.path.join(tmp, "o"), send_alerts=False, **kw)
+                return summary, {e.key: e for e, _f in transport.sent}
+
+            pings = {"354745": self.mp("354745", 0.3, locator="2242849908")}
+            summary, sent = run(mp_pings=pings)
+            self.assertEqual(summary["report"]["macropoint_not_counted"], ["354745"])
+            self.assertNotIn("354745", summary["report"]["never"])
+            self.assertIn("354745", sent["noping-report"].load_ids)
+            summary, sent = run(mp_pings=pings, report_macropoint=False)
+            self.assertIn("354745", summary["report"]["never"])
+            self.assertEqual(summary["report"]["macropoint_not_counted"], [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        args = tracking_update_lambda.alert_args("/w", {"TRACK_REPORT_MACROPOINT": "0", "TRACK_REPORT_MP_HOURS": "24"})
+        self.assertIn("--report-no-macropoint", args)
+        self.assertEqual(args[args.index("--report-mp-hours") + 1], "24")
+        self.assertNotIn("--report-no-macropoint", tracking_update_lambda.alert_args("/w", {}))
 
 
 class SteadyRuleTests(unittest.TestCase):

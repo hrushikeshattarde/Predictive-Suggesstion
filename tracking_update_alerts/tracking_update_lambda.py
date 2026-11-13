@@ -33,6 +33,8 @@ Environment variables::
     TRACK_REPORT_HOURS      Eastern hour(s) whose run sends the report: "7,11,15,18" (default), "8", "all", "-" (never)
     TRACK_REPORT_QUIET_HOURS  the report lists drivers quiet for longer than this (default 11)
     TRACK_REPORT_STATUS     statuses scanned for the report only, no comments or alerts (default In-Route; "-" for none)
+    TRACK_REPORT_MACROPOINT "0" stops taking loads MacroPoint tracks off the full report's No GPS pings list
+    TRACK_REPORT_MP_HOURS   how recent that MacroPoint ping must be (default 48)
     TRACK_NOPING_REPORT_TO / _HOURS  the short no-ping report (No Pings, OK, tracking rate): recipients (default Stuart
                             Mitchell) and hours (default 7,11,15,18); "-" = nobody / never
     TRACK_REPORT_STEADY_HOURS / _PINGS / _GAP_HOURS  a quiet load is not a report issue when its driver pinged steadily:
@@ -77,8 +79,9 @@ DEFAULT_BUCKET = "circle-reload-suggestions"
 DEFAULT_PREFIX = "tracking-alerts/"
 CONFIG_PREFIX = "config/"
 DEFAULT_MACROPOINT_PREFIX = "macropoint/latest/"
-#: Only pings this recent are copied down; the job writes pings at most 3 h old anyway.
-MACROPOINT_COPY_HOURS = 24
+#: Only pings this recent are copied down: two days, the window of the GPS link, of the
+#: MacroPoint locations and of the full report's MacroPoint check.
+MACROPOINT_COPY_HOURS = 48
 
 
 def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | None = None) -> list[str]:
@@ -121,6 +124,10 @@ def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | Non
             args += [option, "" if env[name].strip() == "-" else env[name]]
     if env.get("TRACK_REPORT_QUIET_HOURS"):
         args += ["--report-quiet-hours", env["TRACK_REPORT_QUIET_HOURS"]]
+    if "TRACK_REPORT_MACROPOINT" in env and env["TRACK_REPORT_MACROPOINT"].strip() and not flag(env, "TRACK_REPORT_MACROPOINT"):
+        args.append("--report-no-macropoint")
+    if env.get("TRACK_REPORT_MP_HOURS"):
+        args += ["--report-mp-hours", env["TRACK_REPORT_MP_HOURS"]]
     for option, name in (("--report-steady-hours", "TRACK_REPORT_STEADY_HOURS"), ("--report-steady-pings", "TRACK_REPORT_STEADY_PINGS"),
                          ("--report-steady-gap-hours", "TRACK_REPORT_STEADY_GAP_HOURS")):
         if env.get(name):
