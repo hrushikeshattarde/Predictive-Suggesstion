@@ -33,8 +33,7 @@ Environment variables::
     TRACK_REPORT_HOURS      Eastern hour(s) whose run sends the report: "7,11,15,18" (default), "8", "all", "-" (never)
     TRACK_REPORT_QUIET_HOURS  the report lists drivers quiet for longer than this (default 11)
     TRACK_REPORT_STATUS     statuses scanned for the report only, no comments or alerts (default In-Route; "-" for none)
-    TRACK_REPORT_MACROPOINT "0" stops taking loads MacroPoint tracks off the full report's No GPS pings list
-    TRACK_REPORT_MP_HOURS   how recent that MacroPoint ping must be (default 48)
+    TRACK_REPORT_MACROPOINT "0" stops taking loads MacroPoint pinged steadily off the full report's issue lists
     TRACK_NOPING_REPORT_TO / _HOURS  the short no-ping report (No Pings, OK, tracking rate): recipients (default Stuart
                             Mitchell) and hours (default 7,11,15,18); "-" = nobody / never
     TRACK_REPORT_STEADY_HOURS / _PINGS / _GAP_HOURS  a quiet load is not a report issue when its driver pinged steadily:
@@ -43,7 +42,7 @@ Environment variables::
     TRACK_MACROPOINT_PREFIX where macropoint_webhook keeps the newest ping per load (default macropoint/latest/; "-" = off)
     TRACK_POST_LOCATIONS    "1" writes the locations (GPS-link ping, else MacroPoint) into Location/ETA; otherwise outbox/
     TRACK_MP_MAX_AGE_HOURS  write a MacroPoint ping only while it is at most this old (default 48)
-    TRACK_MP_SAME_PLACE_HOURS  re-write an unchanged MacroPoint place only after this long (default 0: every new ping)
+    TRACK_MP_SAME_PLACE_HOURS  re-write an unchanged MacroPoint place only after this long (default 48: until the truck moves; 0 = every new ping)
     TRACK_MP_PHONE_MATCH    "0" writes even when MacroPoint's phone differs from the CargoTel driver cell
     TRACK_MP_COMMENTS       "0" stops also posting the MacroPoint place as a dispatch comment labelled (MacroPoint)
     TRACK_GPS_FALLBACK_HOURS  a GPS-link ping older than this counts like no ping: MacroPoint is used (default 4)
@@ -126,8 +125,6 @@ def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | Non
         args += ["--report-quiet-hours", env["TRACK_REPORT_QUIET_HOURS"]]
     if "TRACK_REPORT_MACROPOINT" in env and env["TRACK_REPORT_MACROPOINT"].strip() and not flag(env, "TRACK_REPORT_MACROPOINT"):
         args.append("--report-no-macropoint")
-    if env.get("TRACK_REPORT_MP_HOURS"):
-        args += ["--report-mp-hours", env["TRACK_REPORT_MP_HOURS"]]
     for option, name in (("--report-steady-hours", "TRACK_REPORT_STEADY_HOURS"), ("--report-steady-pings", "TRACK_REPORT_STEADY_PINGS"),
                          ("--report-steady-gap-hours", "TRACK_REPORT_STEADY_GAP_HOURS")):
         if env.get(name):

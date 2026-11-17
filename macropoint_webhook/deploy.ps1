@@ -113,7 +113,7 @@ if ($exists -and -not $RotateToken) {
 if (-not $token) { $token = New-Token; Write-Host "new secret path segment generated" }
 
 $envFile = Join-Path $Build "env.json"
-$vars = [ordered]@{ MP_PATH_TOKEN = $token; MP_BUCKET = $Bucket; MP_PREFIX = $Prefix; MP_ID_PATTERN = $IdPattern; MP_HISTORY = "20" }
+$vars = [ordered]@{ MP_PATH_TOKEN = $token; MP_BUCKET = $Bucket; MP_PREFIX = $Prefix; MP_ID_PATTERN = $IdPattern; MP_HISTORY = "100" }
 Write-Utf8 $envFile (@{ Variables = $vars } | ConvertTo-Json -Compress)
 
 # ---------------------------------------------------------------- function

@@ -141,18 +141,26 @@ loads with issues (41 with no GPS pings, 11 quiet for more than 11 h)`. A run at
 11 h, 57 fine; Kingbee 26, Stellantis 10, Enterprise Utah 5, Kar Korner 5, ...; Victoria
 Storm 20, Juan Bernal 13, Kyle Link 5, ...
 
-### MacroPoint takes no-ping loads off the full report (since 2026-11-13 08:24 ET)
+### MacroPoint takes steadily tracked loads off the full report (since 2026-11-17)
 
-Asked for on 2026-11-13: in the full report, a load with no ping on its GPS City/St link is
-not an issue when MacroPoint has a ping for it in the last 2 days (`--report-mp-hours`,
-`TRACK_REPORT_MP_HOURS`, default 48), with the same phone check as the Location/ETA step
-(MacroPoint's locator and the CargoTel driver cell must match when both are phone numbers).
-Such loads count as without issues and are named, with MacroPoint's latest place and time,
-in a "Not counted as issues, tracked in MacroPoint" line; the intro sentence says so. The
-quiet-for-more-than-11-h list and Stuart's short report are unchanged (the short report
-still counts them as No Pings). `--report-no-macropoint` / `TRACK_REPORT_MACROPOINT=0` turn it
-off. The Lambda handler now copies the last 48 hours of MacroPoint pings (was 24) to match.
-Nothing changes until MacroPoint's Location Updates callback is set.
+In the full report, a load with no ping on its GPS City/St link, or quiet on it for more
+than 11 hours, is not an issue when MacroPoint pinged it steadily: the report's own steady
+test on MacroPoint's pings (at least 5 in the past 16 hours, none more than 3 hours apart;
+`--report-steady-*`, the default test when the report's is off), with the same phone check
+as the Location/ETA step (MacroPoint's locator and the CargoTel driver cell must match when
+both are phone numbers). Such loads count as without issues and are named, with MacroPoint's
+latest place and time, in a "Not counted as issues, tracked in MacroPoint" line; the intro
+sentence says so. Stuart's short report is unchanged (it still counts them as No Pings).
+`--report-no-macropoint` / `TRACK_REPORT_MACROPOINT=0` turn it off. The pings come from the
+receiver's files (`load_histories`: the newest ping and up to `MP_HISTORY`, 100, before it);
+the Lambda handler copies the files of the last 48 hours.
+
+History: from 2026-11-13 08:24 ET a load with no GPS-link ping came off when MacroPoint had
+any ping for it in the last 2 days (`--report-mp-hours`, now gone), and quiet loads were not
+looked at. Justice's question on 2026-11-17 (354353 was quiet for 11+ hours on the GPS link
+but pinging every 20 minutes in MacroPoint, and still listed) made it the steady test for
+both lists. On the 7 AM report of 11/17 that would have taken 6 quiet loads off (356991,
+358548, 355863, 355837, 354353, 358375) and put back 357533 (one MacroPoint ping, 13 h old).
 
 ### The short no-ping report for Stuart Mitchell (since 2026-11-12 16:36 ET)
 
@@ -221,8 +229,10 @@ Details:
   comments. A MacroPoint ping must also be at most 48 hours old (`--mp-max-age-hours`, the GPS
   link's own two days) and, when MacroPoint's tracked phone and the CargoTel driver cell are
   both phone numbers, they must match (`--mp-no-phone-match` turns that off; Circle's
-  MacroPoint account also tracks TransportPro loads). `--mp-same-place-hours` (default 0)
-  can hold back a MacroPoint ping at an unchanged place.
+  MacroPoint account also tracks TransportPro loads). A MacroPoint ping at the place last
+  written is held back (`--mp-same-place-hours`, default 48, so in practice until the truck
+  moves; 0 writes every new ping): a parked truck gets one Location Update and one
+  "(MacroPoint)" comment, not one every hour (since 2026-11-17).
 - **How it is written:** like the load page's Location/ETA function: the place goes through
   CargoTel's own City/State/Zip lookup (`/cargotel/zipService.mcgi?action=getZip`,
   `Forsyth, GA` -> `31029 (Forsyth, GA)`; an unknown place falls back to the zip, then is

@@ -23,7 +23,15 @@ from datetime import timedelta, timezone
 from tests.test_tracking_update_alerts import GPS, NOW, PAGE, REPS, FakePoster, FakeTransport, fetch_gps  # noqa: E402
 
 from cargotel_search import parse_grid  # noqa: E402
-from macropoint_locations import LocationState, LocationWriter, MpPing, load_pings, mp_comment_text, plan_locations  # noqa: E402
+from macropoint_locations import (  # noqa: E402
+    LocationState,
+    LocationWriter,
+    MpPing,
+    load_histories,
+    load_pings,
+    mp_comment_text,
+    plan_locations,
+)
 from tracking_update_alerts import (  # noqa: E402
     AlertState,
     CommentState,
@@ -286,10 +294,20 @@ class MacroPointPlanTests(unittest.TestCase):
         self.assertEqual(skipped["352242"], "newest ping is 5.0 h old")
         state = LocationState(None)
         state.mark("360002", ping("360002", 120), "x", NOW - timedelta(minutes=30))
-        plans, _s = plan_locations(loads, {"360002": ping("360002", 10)}, state, NOW)
-        self.assertEqual([(p.load_id, p.reason) for p in plans], [("360002", "refresh")])  # same place, new ping: written
+        # same place, new ping: held back by default (a parked truck is written once)
+        plans, skipped = plan_locations(loads, {"360002": ping("360002", 10)}, state, NOW)
+        self.assertEqual(plans, [])
+        self.assertEqual(skipped["360002"], "still at Forsyth, GA, written 0.5 h ago")
         plans, skipped = plan_locations(loads, {"360002": ping("360002", 10)}, state, NOW, same_place_hours=3)
         self.assertEqual(skipped["360002"], "still at Forsyth, GA, written 0.5 h ago")
+        # written again once the hold is over, or with the hold off
+        plans, _s = plan_locations(loads, {"360002": ping("360002", 10)}, state, NOW + timedelta(hours=47.6))
+        self.assertEqual([(p.load_id, p.reason) for p in plans], [("360002", "refresh")])
+        plans, _s = plan_locations(loads, {"360002": ping("360002", 10)}, state, NOW, same_place_hours=0)
+        self.assertEqual([(p.load_id, p.reason) for p in plans], [("360002", "refresh")])
+        # a ping at another place is written at once
+        plans, _s = plan_locations(loads, {"360002": ping("360002", 10, city="Macon")}, state, NOW)
+        self.assertEqual([(p.load_id, p.reason) for p in plans], [("360002", "moved")])
 
     def test_odd_pings(self):
         loads = screen_loads(parse_grid(PAGE), statuses=("Dispatched", "In-Route"))
@@ -328,6 +346,24 @@ class FileTests(unittest.TestCase):
         again = LocationState(path)
         self.assertEqual(sorted(again.written), ["352242"])
         self.assertEqual(again.get("352242")["source"], "cargotel")
+
+    def test_load_histories(self):
+        """Every stored ping (latest and history), oldest first, for the report's steady test."""
+        newest, older, oldest = ping("354745", 5, city="Macon"), ping("354745", 25, city="Forsyth"), ping("354745", 45, city="Juliette")
+        rec = record(newest)
+        rec["history"] = [record(oldest)["latest"], record(older)["latest"], dict(record(older)["latest"], when_utc="")]  # unsorted, one without a time
+        with open(os.path.join(self.tmp, "354745.json"), "w", encoding="utf-8") as handle:
+            json.dump(rec, handle)
+        with open(os.path.join(self.tmp, "360002.json"), "w", encoding="utf-8") as handle:
+            json.dump(record(PINGS["360002"]), handle)
+        with open(os.path.join(self.tmp, "junk.json"), "w", encoding="utf-8") as handle:
+            handle.write("not json")
+        histories = load_histories(self.tmp)
+        self.assertEqual(sorted(histories), ["354745", "360002"])
+        self.assertEqual([p.city for p in histories["354745"]], ["Juliette", "Forsyth", "Macon"])
+        self.assertEqual(histories["354745"][-1].when, newest.when)
+        self.assertEqual(len(histories["360002"]), 1)
+        self.assertEqual(load_histories(os.path.join(self.tmp, "missing")), {})
 
 
 class WriterTests(unittest.TestCase):

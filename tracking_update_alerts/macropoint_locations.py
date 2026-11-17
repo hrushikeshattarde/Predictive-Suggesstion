@@ -24,8 +24,8 @@ A load with no CargoTel ping is written from MacroPoint when MacroPoint's newest
 
 * is at most ``max_age_hours`` old (default 48, the same two days the GPS link covers);
 * is newer than the ping last written on that load, from either source (``location_state.json``);
-* (optional, off by default) names a different place than the last write or comes
-  ``same_place_hours`` after it;
+* names a different place than the last write, or comes ``same_place_hours`` (48) after
+  it: a parked truck's place is written once, not with every ping (since 2026-11-17);
 * tracks the load's driver: when MacroPoint's locator and CargoTel's driver cell are both
   phone numbers they must match (the account also tracks TransportPro loads, whose order
   ids could collide with a CargoTel load number); a truck or ELD locator is accepted.
@@ -42,8 +42,10 @@ from typing import Any, Callable, Iterable
 
 #: MacroPoint pings up to two days old count, like the GPS link's own two-day window.
 DEFAULT_MAX_AGE_HOURS = 48.0
-#: 0 = a new ping is written even at the same place (as the driver-app comments are).
-DEFAULT_SAME_PLACE_HOURS = 0.0
+#: A ping at the place last written is held back for this long (48 h, the whole window a
+#: MacroPoint ping is used in, so in practice until the truck moves); 0 = write every new ping.
+#: The user's request, 2026-11-17, after a parked truck got the same Location Update hourly.
+DEFAULT_SAME_PLACE_HOURS = 48.0
 ZIP_SERVICE_PATH = "/cargotel/zipService.mcgi"
 LOCATION_FORM_PATH = "/cargotel/db.mcgi"
 
@@ -81,13 +83,26 @@ def _when(text: str | None) -> datetime | None:
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
-def ping_from_record(record: dict[str, Any]) -> MpPing | None:
-    latest = record.get("latest") if isinstance(record, dict) else None
-    if not isinstance(latest, dict) or not latest.get("load_id"):
+def _ping(raw: Any) -> MpPing | None:
+    if not isinstance(raw, dict) or not raw.get("load_id"):
         return None
-    return MpPing(load_id=str(latest["load_id"]), when=_when(latest.get("when_utc")), city=latest.get("city") or "",
-                  state=latest.get("state") or "", postal=latest.get("postal") or "", lat=latest.get("lat"), lng=latest.get("lng"),
-                  locator=latest.get("locator") or "", source=latest.get("data_source") or "")
+    return MpPing(load_id=str(raw["load_id"]), when=_when(raw.get("when_utc")), city=raw.get("city") or "",
+                  state=raw.get("state") or "", postal=raw.get("postal") or "", lat=raw.get("lat"), lng=raw.get("lng"),
+                  locator=raw.get("locator") or "", source=raw.get("data_source") or "")
+
+
+def ping_from_record(record: dict[str, Any]) -> MpPing | None:
+    return _ping(record.get("latest") if isinstance(record, dict) else None)
+
+
+def history_from_record(record: dict[str, Any]) -> list[MpPing]:
+    """Every ping in a receiver record (``latest`` and ``history``), oldest first."""
+
+    if not isinstance(record, dict):
+        return []
+    raw = [record.get("latest")] + list(record.get("history") or [])
+    pings = [p for p in (_ping(r) for r in raw) if p is not None and p.when is not None]
+    return sorted(pings, key=lambda p: p.when)
 
 
 def load_pings(folder: str | None) -> dict[str, MpPing]:
@@ -107,6 +122,26 @@ def load_pings(folder: str | None) -> dict[str, MpPing]:
         if ping:
             pings[ping.load_id] = ping
     return pings
+
+
+def load_histories(folder: str | None) -> dict[str, list[MpPing]]:
+    """``{load_id: every stored ping, oldest first}`` from the receiver's ``<load>.json`` files
+    (the newest ping and up to ``MP_HISTORY`` before it): the full report's steady test."""
+
+    out: dict[str, list[MpPing]] = {}
+    if not folder or not os.path.isdir(folder):
+        return out
+    for name in os.listdir(folder):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(folder, name), encoding="utf-8") as handle:
+                pings = history_from_record(json.load(handle))
+        except (OSError, ValueError):
+            continue
+        if pings:
+            out[pings[-1].load_id] = pings
+    return out
 
 
 def digits(text: str | None) -> str:

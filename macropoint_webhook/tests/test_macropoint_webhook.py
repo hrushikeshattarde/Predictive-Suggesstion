@@ -8,7 +8,7 @@ import json
 import os
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 FOLDER = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if FOLDER not in sys.path:
@@ -108,11 +108,14 @@ class HandleTests(unittest.TestCase):
         self.assertEqual(self.s3.puts, puts)
 
     def test_history_is_capped(self):
-        for minute in range(30):
-            self.call(event(query(when=f"2026-11-12T14:{minute:02d}:00Z", lat=str(33 + minute / 100))))
+        start = datetime(2026, 11, 12, 12, 0, tzinfo=timezone.utc)
+        for minute in range(mw.DEFAULT_HISTORY + 10):
+            when = start + timedelta(minutes=minute)
+            self.call(event(query(when=when.strftime("%Y-%m-%dT%H:%M:%SZ"), lat=str(33 + minute / 1000))))
         rec = self.s3.record("354350")
-        self.assertEqual(rec["latest"]["when_utc"], "2026-11-12T14:29:00+00:00")
+        self.assertEqual(rec["latest"]["when_utc"], (start + timedelta(minutes=mw.DEFAULT_HISTORY + 9)).isoformat())
         self.assertEqual(len(rec["history"]), mw.DEFAULT_HISTORY)
+        self.assertEqual(mw.DEFAULT_HISTORY, 100)  # about a day of 15-minute pings: the report's 16-hour steady test
 
     def test_other_order_ids_are_dropped(self):
         for load_id in ("2650622", "Load-123", "1002-351455", ""):

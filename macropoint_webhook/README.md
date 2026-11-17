@@ -31,7 +31,7 @@ MacroPoint ──GET ?ID=354350&City=Forsyth&State=GA&LocationDateTimeUTC=...─
    │  ID not six digits (TransportPro loads)   -> 200 "ignored", nothing kept
    ▼
 s3://circle-reload-suggestions/macropoint/latest/<load>.json
-   {"load_id", "latest": {ping}, "history": [20 older pings]}   newest by LocationDateTimeUTC;
+   {"load_id", "latest": {ping}, "history": [100 older pings]}  newest by LocationDateTimeUTC;
                                                                 late or repeated pings never replace it
    ▼
 hourly tracking-update run copies latest/ (last 24 h) and writes the place into Location/ETA
@@ -54,7 +54,8 @@ Function `circle-macropoint-webhook` (Python 3.12, 128 MB, 10 s), role
 `circle-macropoint-webhook-role` (read/write `macropoint/*` in the bucket, logs only), a
 public function URL (auth NONE, guarded by the secret path segment `MP_PATH_TOKEN`).
 Environment: `MP_PATH_TOKEN`, `MP_BUCKET`, `MP_PREFIX` (`macropoint/`), `MP_ID_PATTERN`
-(`^\d{6}$`), `MP_HISTORY` (20); optional `MP_BASIC_AUTH` (`user:password`) for MacroPoint's
+(`^\d{6}$`), `MP_HISTORY` (100 since 2026-11-17, was 20: about a day of 15-minute pings, for the
+full report's 16-hour steady test); optional `MP_BASIC_AUTH` (`user:password`) for MacroPoint's
 Basic authentication instead of the secret path.
 
 The URL to enter in MacroPoint is written by the deploy script to

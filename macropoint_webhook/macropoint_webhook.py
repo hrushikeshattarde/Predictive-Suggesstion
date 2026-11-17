@@ -21,7 +21,8 @@ What it keeps, in ``s3://MP_BUCKET/MP_PREFIX``::
 
     latest/<load id>.json    {"load_id", "latest": {ping}, "history": [{ping}, ...]}
 
-newest ping first, ``MP_HISTORY`` (20) pings of history; an older or repeated ping never
+newest ping first, ``MP_HISTORY`` (100, about a day at MacroPoint's 15-minute pings, enough for
+the report's 16-hour steady test) pings of history; an older or repeated ping never
 replaces a newer one. The hourly tracking-update job reads ``latest/`` and writes the
 place into the load's Location/ETA in CargoTel.
 
@@ -38,7 +39,7 @@ Environment::
     MP_BUCKET         bucket (default circle-reload-suggestions)
     MP_PREFIX         key prefix (default macropoint/)
     MP_ID_PATTERN     regex of the order ids to keep (default ^\\d{6}$, CargoTel load numbers)
-    MP_HISTORY        pings of history kept per load (default 20)
+    MP_HISTORY        pings of history kept per load (default 100)
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ from urllib.parse import parse_qsl
 DEFAULT_BUCKET = "circle-reload-suggestions"
 DEFAULT_PREFIX = "macropoint/"
 DEFAULT_ID_PATTERN = r"^\d{6}$"
-DEFAULT_HISTORY = 20
+DEFAULT_HISTORY = 100
 #: MacroPoint's published callback source addresses (docs, "IP Addresses").
 MACROPOINT_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
     "52.141.169.150/32", "52.141.169.192/28", "52.152.27.96/28", "52.237.140.174/32"))

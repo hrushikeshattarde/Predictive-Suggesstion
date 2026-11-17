@@ -926,12 +926,23 @@ class NoPingReportTests(unittest.TestCase):
 
 
 class MacroPointInReportTests(unittest.TestCase):
-    """The full report: a load with no GPS-link ping is not an issue when MacroPoint has a ping
-    for it in the last 2 days (phone checked); Stuart's short report is unchanged."""
+    """The full report: a load with no GPS-link ping, or quiet on it, is not an issue when
+    MacroPoint pinged it steadily (the report's steady rule on MacroPoint's pings, phone
+    checked; Justice, 2026-11-17); Stuart's short report is unchanged."""
 
     @staticmethod
-    def mp(load_id, hours_ago, city="Macon", state="GA", locator=""):
-        return MpPing(load_id, (NOW - timedelta(hours=hours_ago)).astimezone(timezone.utc), city, state, "", 32.8, -83.6, locator, "Ping")
+    def mp(load_id, minutes_ago, city="Macon", state="GA", locator=""):
+        return MpPing(load_id, (NOW - timedelta(minutes=minutes_ago)).astimezone(timezone.utc), city, state, "", 32.8, -83.6, locator, "Ping")
+
+    def steady(self, load_id, locator="", every=20, hours=16, skip=None):
+        """A ping every ``every`` minutes over the past ``hours``, the newest 5 minutes ago;
+        ``skip`` = (from, to) minutes ago with no pings."""
+        out = []
+        for m in range(5, int(hours * 60), every):
+            if skip and skip[0] <= m <= skip[1]:
+                continue
+            out.append(self.mp(load_id, m, locator=locator))
+        return sorted(out, key=lambda p: p.when)
 
     def scanned(self):
         loads, _w, counts, _e = checked_loads()
@@ -939,30 +950,44 @@ class MacroPointInReportTests(unittest.TestCase):
         check_gps(extra, fetch_gps, NOW)
         return loads + extra, counts
 
+    def history(self):
+        return {"354745": self.steady("354745", locator="2242849908"),        # no GPS-link ping, same phone: covered
+                "352243": self.steady("352243"),                              # quiet 19 h on the GPS link: covered too
+                "360002": [self.mp("360002", 30), self.mp("360002", 10)],     # two pings: not steady
+                "360008": self.steady("360008", locator="9999999999"),        # another phone: not
+                "360003": self.steady("360003", skip=(240, 600)),             # a 6-hour gap: not steady
+                "352242": self.steady("352242")}                              # pinging on the GPS link: no issue anyway
+
     def test_covered(self):
         scanned, _c = self.scanned()
-        pings = {"354745": self.mp("354745", 0.3, locator="2242849908"),   # no GPS-link ping, same phone: covered
-                 "360002": self.mp("360002", 50),                           # older than 2 days: not
-                 "360008": self.mp("360008", 1, locator="9999999999"),     # another phone: not
-                 "352242": self.mp("352242", 1)}                            # has GPS-link pings: not this rule's business
-        self.assertEqual(sorted(macropoint_covered(scanned, pings, NOW)), ["354745"])
-        self.assertEqual(sorted(macropoint_covered(scanned, pings, NOW, hours=60)), ["354745", "360002"])
+        covered = macropoint_covered(scanned, self.history(), NOW)
+        self.assertEqual(sorted(covered), ["352243", "354745"])
+        self.assertEqual(covered["354745"].when, (NOW - timedelta(minutes=5)).astimezone(timezone.utc))  # the newest ping
+        # the report's own steady rule is the test (a looser one lets the two pings count)
+        self.assertEqual(sorted(macropoint_covered(scanned, self.history(), NOW, steady=SteadyRule(16, 2, 3))),
+                         ["352243", "354745", "360002"])
+        # with the report's steady rule off, MacroPoint is still held to the default one
+        self.assertEqual(sorted(macropoint_covered(scanned, self.history(), NOW, steady=None)), ["352243", "354745"])
         self.assertEqual(macropoint_covered(scanned, None, NOW), {})
 
     def test_report(self):
         scanned, counts = self.scanned()
-        covered = macropoint_covered(scanned, {"354745": self.mp("354745", 0.3, locator="2242849908")}, NOW)
+        covered = macropoint_covered(scanned, self.history(), NOW)
         email = compose_report(scanned, now=NOW, to=["justice.cromwell@circledelivers.com"], reps=REPS, counts=counts, mp_covered=covered)
-        self.assertEqual(email.subject, "GPS tracking report Fri 11/06 09:00: 4 of 11 loads with issues (2 with no GPS pings, 2 quiet for more than 11 h)")
+        self.assertEqual(email.subject, "GPS tracking report Fri 11/06 09:00: 3 of 11 loads with issues (2 with no GPS pings, 1 quiet for more than 11 h)")
         self.assertNotIn("354745", email.load_ids)
-        self.assertIn("a load with no GPS-link ping is not an issue when MacroPoint has a ping for it in the same time", email.text)
-        self.assertIn("NOT COUNTED AS ISSUES, TRACKED IN MACROPOINT (1): no ping on the GPS link, but MacroPoint has one: "
-                      "354745 (Macon, GA, Fri 11/06 08:42)", email.text)
+        self.assertNotIn("352243", email.load_ids)
+        self.assertIn("a load with no ping, or quiet, on the GPS link is not an issue when MacroPoint pinged it steadily "
+                      "(at least 5 pings in the past 16 hours, none more than 3 hours apart)", email.text)
+        self.assertIn("NOT COUNTED AS ISSUES, TRACKED IN MACROPOINT (2): no ping or quiet on the GPS link, but MacroPoint pinged "
+                      "steadily (its latest ping): ", email.text)
+        self.assertIn("354745 (Macon, GA, Fri 11/06 08:55)", email.text)
+        self.assertIn("352243 (Macon, GA, Fri 11/06 08:55)", email.text)
         self.assertIn("NO GPS PINGS (2)", email.text)
-        self.assertIn("Not counted as issues, tracked in MacroPoint (1)", email.html)
+        self.assertIn("Not counted as issues, tracked in MacroPoint (2)", email.html)
         # without MacroPoint data the report is as before, and says nothing about MacroPoint
         email = compose_report(scanned, now=NOW, to=["x@y.com"], reps=REPS, counts=counts)
-        self.assertIn("5 of 11 loads with issues (3 with no GPS pings", email.subject)
+        self.assertIn("5 of 11 loads with issues (3 with no GPS pings, 2 quiet", email.subject)
         self.assertNotIn("MacroPoint", email.text)
         # Stuart's short report keeps counting it as no pings
         short = compose_noping_report(scanned, now=NOW, to=["smitchell@circledelivers.com"], counts=counts)
@@ -979,19 +1004,27 @@ class MacroPointInReportTests(unittest.TestCase):
                                    outbox=os.path.join(tmp, "o"), send_alerts=False, **kw)
                 return summary, {e.key: e for e, _f in transport.sent}
 
-            pings = {"354745": self.mp("354745", 0.3, locator="2242849908")}
-            summary, sent = run(mp_pings=pings)
-            self.assertEqual(summary["report"]["macropoint_not_counted"], ["354745"])
+            # the report runs at 11:00 here: the pings move with it
+            later = timedelta(hours=2)
+            history = {k: [MpPing(p.load_id, p.when + later, p.city, p.state, p.postal, p.lat, p.lng, p.locator, p.source) for p in v]
+                       for k, v in self.history().items()}
+            newest = {k: v[-1] for k, v in history.items()}
+            summary, sent = run(mp_pings=newest, mp_history=history)
+            self.assertEqual(summary["report"]["macropoint_not_counted"], ["352243", "354745"])
             self.assertNotIn("354745", summary["report"]["never"])
+            self.assertNotIn("352243", summary["report"]["quiet"])
             self.assertIn("354745", sent["noping-report"].load_ids)
-            summary, sent = run(mp_pings=pings, report_macropoint=False)
+            # one ping per load (no history): not steady, nothing taken off
+            summary, sent = run(mp_pings=newest)
+            self.assertEqual(summary["report"]["macropoint_not_counted"], [])
+            summary, sent = run(mp_pings=newest, mp_history=history, report_macropoint=False)
             self.assertIn("354745", summary["report"]["never"])
+            self.assertIn("352243", summary["report"]["quiet"])
             self.assertEqual(summary["report"]["macropoint_not_counted"], [])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        args = tracking_update_lambda.alert_args("/w", {"TRACK_REPORT_MACROPOINT": "0", "TRACK_REPORT_MP_HOURS": "24"})
+        args = tracking_update_lambda.alert_args("/w", {"TRACK_REPORT_MACROPOINT": "0"})
         self.assertIn("--report-no-macropoint", args)
-        self.assertEqual(args[args.index("--report-mp-hours") + 1], "24")
         self.assertNotIn("--report-no-macropoint", tracking_update_lambda.alert_args("/w", {}))
 
 
