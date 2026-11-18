@@ -34,6 +34,8 @@ Environment variables::
     TRACK_REPORT_QUIET_HOURS  the report lists drivers quiet for longer than this (default 11)
     TRACK_REPORT_STATUS     statuses scanned for the report only, no comments or alerts (default In-Route; "-" for none)
     TRACK_REPORT_MACROPOINT "0" stops taking loads MacroPoint pinged steadily off the full report's issue lists
+    TRACK_SCREEN_CHECK      "0" stops reading the screen as the team sees it as well (by default its loads missing
+                            from the job's read are added, since 2026-11-18)
     TRACK_NOPING_REPORT_TO / _HOURS  the short no-ping report (No Pings, OK, tracking rate): recipients (default Stuart
                             Mitchell) and hours (default 7,11,15,18); "-" = nobody / never
     TRACK_REPORT_STEADY_HOURS / _PINGS / _GAP_HOURS  a quiet load is not a report issue when its driver pinged steadily:
@@ -125,6 +127,8 @@ def alert_args(work: str, env: Mapping[str, str], event: Mapping[str, Any] | Non
         args += ["--report-quiet-hours", env["TRACK_REPORT_QUIET_HOURS"]]
     if "TRACK_REPORT_MACROPOINT" in env and env["TRACK_REPORT_MACROPOINT"].strip() and not flag(env, "TRACK_REPORT_MACROPOINT"):
         args.append("--report-no-macropoint")
+    if "TRACK_SCREEN_CHECK" in env and env["TRACK_SCREEN_CHECK"].strip() and not flag(env, "TRACK_SCREEN_CHECK"):
+        args.append("--no-screen-check")
     for option, name in (("--report-steady-hours", "TRACK_REPORT_STEADY_HOURS"), ("--report-steady-pings", "TRACK_REPORT_STEADY_PINGS"),
                          ("--report-steady-gap-hours", "TRACK_REPORT_STEADY_GAP_HOURS")):
         if env.get(name):

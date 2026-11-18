@@ -1642,9 +1642,9 @@ def compose_report(
     listed by customer and dispatch rep. Plain text and HTML."""
 
     never, quiet = report_loads(loads, now, quiet_hours, steady, mp_covered)
-    rested = steady_quiet_loads(loads, now, quiet_hours, steady)
-    on_mp = sorted((l for l in loads if mp_covered and l.load_id in mp_covered
-                    and report_bucket(l, now, quiet_hours, steady) in (NEVER, QUIET)), key=_report_key)
+    # Loads the steady rule or MacroPoint take off are not named in the email at all (Justice,
+    # 2026-11-18: a load named in a "not counted" line reads as still on the report); the run's
+    # sent_log entry keeps them ("steady_not_counted", "macropoint_not_counted").
     unknown = [l for l in loads if l.tracking == UNKNOWN]
     hours = f"{quiet_hours:g}"
     breakdown = report_breakdowns(loads, now, quiet_hours, tuple(statuses) + tuple(report_statuses), steady, mp_covered)
@@ -1697,14 +1697,6 @@ def compose_report(
     text_parts += ["BY DISPATCH REP"] + _tally_table_text("dispatch rep", by_rep, hours, show_unknown, total=True) + [""]
     for title, members, hint, _with_ping in sections:
         text_parts += _report_text_section(title, members, now, hint)
-    if on_mp:
-        text_parts += [f"NOT COUNTED AS ISSUES, TRACKED IN MACROPOINT ({len(on_mp)}): no ping or quiet on the GPS link, "
-                       "but MacroPoint pinged steadily (its latest ping): "
-                       + ", ".join(f"{l.load_id} ({mp_covered[l.load_id].place}, "
-                                   f"{_local(mp_covered[l.load_id].when, now):%a %m/%d %H:%M})" for l in on_mp), ""]
-    if rested and steady:
-        text_parts += [f"NOT COUNTED AS ISSUES ({len(rested)}): quiet for more than {hours} h, but the driver pinged steadily before "
-                       f"that ({steady.describe()}), e.g. parked for the night: " + ", ".join(l.load_id for l in rested), ""]
     if unknown:
         text_parts += [f"GPS PAGE UNREADABLE ({len(unknown)}): " + ", ".join(l.load_id for l in unknown), ""]
     text_parts.append(trailer)
@@ -1717,15 +1709,6 @@ def compose_report(
     for title, members, hint, with_ping in sections:
         blocks.append(f'<h3 style="margin:20px 0 2px">{esc(title)} ({len(members)})</h3><p style="margin:0 0 6px;color:#444">{esc(hint)}</p>'
                       + (_report_html_table(members, now, with_ping=with_ping) if members else "<p>none</p>"))
-    if on_mp:
-        blocks.append(f'<p style="color:#444">Not counted as issues, tracked in MacroPoint ({len(on_mp)}): no ping or quiet on the '
-                      "GPS link, but MacroPoint pinged steadily (its latest ping): " + ", ".join(
-                          f'<a href="{esc(l.url)}">{esc(l.load_id)}</a> ({esc(mp_covered[l.load_id].place)}, '
-                          f"{_local(mp_covered[l.load_id].when, now):%a %m/%d %H:%M})" for l in on_mp) + "</p>")
-    if rested and steady:
-        blocks.append(f'<p style="color:#444">Not counted as issues ({len(rested)}): quiet for more than {esc(hours)} h, but the driver '
-                      f"pinged steadily before that ({esc(steady.describe())}), e.g. parked for the night: "
-                      + ", ".join(f'<a href="{esc(l.url)}">{esc(l.load_id)}</a>' for l in rested) + "</p>")
     if unknown:
         blocks.append(f'<p style="color:#444">GPS page unreadable ({len(unknown)}): '
                       + ", ".join(f'<a href="{esc(l.url)}">{esc(l.load_id)}</a>' for l in unknown) + "</p>")
@@ -1977,6 +1960,70 @@ def fetch_grid_html(session: CargoTelSession, now: datetime, *, saved_id: str = 
     if grid.signin_page:
         raise RuntimeError("CargoTel answered with the sign-in page twice; the S3 session cookie is stale")
     return html, grid
+
+
+def fetch_saved_grid(session: CargoTelSession, *, saved_id: str = SEARCH_ID, save_html: str | None = None) -> Grid:
+    """The screen exactly as saved, the way the team sees it: only the extra columns are
+    asked for, which leaves the saved filter alone (checked 2026-11-18: 245 loads either
+    way). See :func:`merge_missing_rows`."""
+
+    spec = SearchParams(saved_id, per_page="All", extra={"Menu__ViewFields": list(EXTRA_VIEW_FIELDS)})  # type: ignore[arg-type]
+    status, html, _params = session.fetch_search_html(spec)
+    if save_html:
+        os.makedirs(save_html, exist_ok=True)
+        with open(os.path.join(save_html, f"grid_saved_{datetime.now():%Y%m%d-%H%M}.html"), "w", encoding="utf-8") as handle:
+            handle.write(html)
+    if status != 200:
+        raise RuntimeError(f"CargoTel Search.mcgi returned HTTP {status} for saved search {saved_id} as saved")
+    grid = parse_grid(html, status)
+    if grid.signin_page:
+        raise RuntimeError("CargoTel answered with the sign-in page twice; the S3 session cookie is stale")
+    return grid
+
+
+def merge_missing_rows(grid: Grid, saved: Grid) -> list[str]:
+    """Adds to ``grid`` (the job's read, Pickup ETA dates sent) the rows of ``saved`` (the
+    screen as the team sees it) whose load it lacks, and returns their load ids, so a load on
+    the team's page is always checked. Asked for on 2026-11-18: 356821 (Dispatched, pickup
+    ETA 11/14, never pinged) was on the page but on no report on 11/16 and 11/17, when the
+    job's read came back short. The usual rules (status, customer, pickup ETA) still apply to
+    the added rows. Nothing is added from a page that lacks a column the job reads."""
+
+    if any(key not in saved.column_keys for key in REQUIRED_COLUMNS):
+        return []
+    have = {row.load_id for row in grid.rows if row.load_id}
+    added: list[str] = []
+    for row in saved.rows:
+        if not row.load_id or row.load_id in have:
+            continue
+        grid.rows.append(row)
+        have.add(row.load_id)
+        if row.link_class != "LinkBundleChild":
+            added.append(row.load_id)
+    return added
+
+
+def screen_check(session: CargoTelSession, grid: Grid, log: Callable[[str], None], *, saved_id: str = SEARCH_ID,
+                 save_html: str | None = None) -> list[str]:
+    """Reads the screen as saved, adds what the job's read lacks, logs it; never fails the run."""
+
+    try:
+        saved = fetch_saved_grid(session, saved_id=saved_id, save_html=save_html)
+    except Exception as exc:  # the run goes on with its own read
+        log(f"screen check failed ({exc}); going on with the job's read")
+        return []
+    on_page = sum(1 for row in saved.rows if row.load_id and row.link_class != "LinkBundleChild")
+    missing = [key for key in REQUIRED_COLUMNS if key not in saved.column_keys]
+    if missing:
+        log(f"screen check: the screen as saved lacks column(s) {', '.join(missing)}; nothing added")
+        return []
+    added = merge_missing_rows(grid, saved)
+    if added:
+        log(f"screen check: {on_page} loads on the screen as the team sees it; {len(added)} missing from the job's read, "
+            f"added: {', '.join(added)}")
+    else:
+        log(f"screen check: {on_page} loads on the screen as the team sees it, none missing from the job's read")
+    return added
 
 
 class CommentPoster:
@@ -2493,6 +2540,8 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
     parser.add_argument("--repeat-hours", type=float, default=DEFAULT_REPEAT_HOURS,
                         help="alert the same load again after this long (default 4; 0 = every run)")
     parser.add_argument("--save-html", metavar="DIR", help="archive the fetched grid page and GPS pages here")
+    parser.add_argument("--no-screen-check", action="store_true",
+                        help="do not also read the screen as the team sees it (by default its loads missing from the job's read are added)")
     parser.add_argument("--from-html", metavar="FILE", help="parse a saved grid page instead of fetching (offline)")
     parser.add_argument("--gps-dir", metavar="DIR", help="offline GPS pages, gps_<load>.html (with --from-html)")
     parser.add_argument("--now", help="pretend it is this time (ISO, with offset), for tests")
@@ -2530,6 +2579,8 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
     else:
         session = CargoTelSession(min_interval=0.5)
         page_html, grid = fetch_grid_html(session, now, saved_id=args.saved_id, days_ahead=args.days_ahead, save_html=args.save_html)
+        if not args.no_screen_check:
+            screen_check(session, grid, log, saved_id=args.saved_id, save_html=args.save_html)
         gps_fetch = gps_fetcher(session, now, args.gps_days)
         poster = CommentPoster(session, now, saved_id=args.saved_id, days_ahead=args.days_ahead, log=log)
         location_writer = LocationWriter(session, BASE_URL, log=log)

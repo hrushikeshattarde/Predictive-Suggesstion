@@ -33,6 +33,29 @@ before `today + --days-ahead` at midnight. Verified 2026-11-06: filtering the un
 pull by "before Nov 7" gives exactly the 93 rows of the saved screen; "before Nov 8" gives
 126 (130 by 09:08, as loads were added).
 
+The job only sees what the saved screen returns, so a change to the screen's own filters
+changes the report. From about 09:30 ET on 2026-11-12 to about 16:30 ET on 2026-11-17 the
+screen came back narrowed: every run logged "0 later, 0 without" (normally dozens of loads
+with a later pickup ETA), and loads whose pickup date was a day or more past dropped off
+it, and so off the report. Example: 356821 (Dispatched, pickup ETA 11/14, never pinged) was
+on every report on 11/14 and 11/15 and missing from 11/16 07:00; 355862, 356681 and 357056
+(pickup ETA 11/14) also vanished on 11/16 and came back at 17:00 on 11/17, when the screen
+returned 309 rows instead of 120. Nothing in the job changed then. A GET cannot override it:
+on 2026-11-18 sending the Pickup ETA dates, a From/To range or the criteria's `fs_` markers
+without the checkbox changed nothing (271 rows each time), so the screen's saved filter
+decides. If the "later" count in the screen log line stays at 0, check the saved screen.
+
+**Screen check (since 2026-11-18).** The team saw 356821 on the page while it was on no
+report, so every live run now also reads the screen exactly as saved, the way the team sees
+it (only the extra columns asked for, which leaves the filter alone: 245 loads either way on
+11/18), and adds any load on it that the job's own read lacks before the usual rules
+(status, customer, pickup ETA) are applied (`fetch_saved_grid`, `merge_missing_rows`,
+`screen_check`). The log says `screen check: N loads on the screen as the team sees it, none
+missing from the job's read` or names the loads it added. One more page read per run (about
+10 s); a failed read is logged and the run goes on with its own read. `--no-screen-check` /
+`TRACK_SCREEN_CHECK=0` turn it off. A load added this way gets its comment only if the
+comment form's narrowed read finds it too (otherwise it is logged as no longer on the screen).
+
 The grid columns the job reads (the saved view, plus the extras it asks for with
 `Menu__ViewFields`):
 
@@ -148,9 +171,10 @@ than 11 hours, is not an issue when MacroPoint pinged it steadily: the report's 
 test on MacroPoint's pings (at least 5 in the past 16 hours, none more than 3 hours apart;
 `--report-steady-*`, the default test when the report's is off), with the same phone check
 as the Location/ETA step (MacroPoint's locator and the CargoTel driver cell must match when
-both are phone numbers). Such loads count as without issues and are named, with MacroPoint's
-latest place and time, in a "Not counted as issues, tracked in MacroPoint" line; the intro
-sentence says so. Stuart's short report is unchanged (it still counts them as No Pings).
+both are phone numbers). Such loads count as without issues and are not named in the email
+(the intro sentence states the rule; the run's sent_log entry keeps them as
+`macropoint_not_counted`). Until 2026-11-18 they were named in a "Not counted as issues,
+tracked in MacroPoint" line, which read as still being on the report (Justice on 359683). Stuart's short report is unchanged (it still counts them as No Pings).
 `--report-no-macropoint` / `TRACK_REPORT_MACROPOINT=0` turn it off. The pings come from the
 receiver's files (`load_histories`: the newest ping and up to `MP_HISTORY`, 100, before it);
 the Lambda handler copies the files of the last 48 hours.
@@ -180,8 +204,9 @@ with no GPS pings, 84.83% tracking).
 
 Asked for by the operations team on 2026-11-12: load 356838 was listed as quiet for more than
 11 hours while its driver was at home for the night after pinging every 5 to 15 minutes all
-evening. A load quiet for more than 11 hours is now counted as without issues, and named in a
-"Not counted as issues" line instead of the quiet list, when its GPS link shows **at least 5
+evening. A load quiet for more than 11 hours is now counted as without issues, and left off the quiet
+list (named nowhere in the email since 2026-11-18; sent_log keeps it as `steady_not_counted`),
+when its GPS link shows **at least 5
 pings in the past 16 hours, none more than 3 hours apart** (`--report-steady-hours`,
 `--report-steady-pings`, `--report-steady-gap-hours`; `TRACK_REPORT_STEADY_*`; hours `0` turns
 it off). The report's intro sentence states the rule. Replayed on the 11:00 report of

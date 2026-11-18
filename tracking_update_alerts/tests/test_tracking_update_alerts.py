@@ -53,6 +53,7 @@ from tracking_update_alerts import (  # noqa: E402
     macropoint_covered,
     mail_groups,
     main,
+    merge_missing_rows,
     needs_comment,
     nice_place,
     parse_ping_stamp,
@@ -980,12 +981,13 @@ class MacroPointInReportTests(unittest.TestCase):
         self.assertNotIn("352243", email.load_ids)
         self.assertIn("a load with no ping, or quiet, on the GPS link is not an issue when MacroPoint pinged it steadily "
                       "(at least 5 pings in the past 16 hours, none more than 3 hours apart)", email.text)
-        self.assertIn("NOT COUNTED AS ISSUES, TRACKED IN MACROPOINT (2): no ping or quiet on the GPS link, but MacroPoint pinged "
-                      "steadily (its latest ping): ", email.text)
-        self.assertIn("354745 (Macon, GA, Fri 11/06 08:55)", email.text)
-        self.assertIn("352243 (Macon, GA, Fri 11/06 08:55)", email.text)
+        # not named anywhere in the email (Justice, 2026-11-18: a "not counted" line read as still on the report)
+        for load_id in ("354745", "352243"):
+            self.assertNotIn(load_id, email.text)
+            self.assertNotIn(load_id, email.html)
+        self.assertNotIn("NOT COUNTED", email.text)
+        self.assertNotIn("Not counted", email.html)
         self.assertIn("NO GPS PINGS (2)", email.text)
-        self.assertIn("Not counted as issues, tracked in MacroPoint (2)", email.html)
         # without MacroPoint data the report is as before, and says nothing about MacroPoint
         email = compose_report(scanned, now=NOW, to=["x@y.com"], reps=REPS, counts=counts)
         self.assertIn("5 of 11 loads with issues (3 with no GPS pings, 2 quiet", email.subject)
@@ -1067,16 +1069,17 @@ class SteadyRuleTests(unittest.TestCase):
         self.assertEqual(report_bucket(recent, NOW), "ok")
         self.assertEqual(steady_quiet_loads([recent], NOW), [])
 
-    def test_report_text_counts_and_lists_them(self):
+    def test_report_text_counts_them_and_leaves_them_out(self):
         steady, few = self.loads(range(13 * 60, 15 * 60 + 1, 10), [13 * 60, 14 * 60])
         email = compose_report([steady, few], now=NOW, to=["justice.cromwell@circledelivers.com"], reps=REPS)
         self.assertIn("unless the driver pinged steadily before that: at least 5 pings in the past 16 hours, none more than 3 hours apart",
                       email.text)
-        self.assertIn(f"NOT COUNTED AS ISSUES (1): quiet for more than 11 h, but the driver pinged steadily before that", email.text)
-        self.assertIn(f"e.g. parked for the night: {steady.load_id}", email.text)
+        # counted as OK and not named anywhere (2026-11-18)
+        self.assertNotIn(steady.load_id, email.text)
+        self.assertNotIn(steady.load_id, email.html)
+        self.assertNotIn("NOT COUNTED", email.text)
         self.assertEqual(email.load_ids, [few.load_id])  # only the other one is listed as quiet
         self.assertIn("GPS tracking report Fri 11/06 09:00: 1 of 2 loads with issues (1 quiet for more than 11 h)", email.subject)
-        self.assertIn(f"Not counted as issues (1)", email.html)
         email = compose_report([steady, few], now=NOW, to=["x@y.com"], reps=REPS, steady=SteadyRule(0))
         self.assertNotIn("NOT COUNTED", email.text)
         self.assertNotIn("unless the driver pinged steadily", email.text)
@@ -1302,6 +1305,63 @@ class RunTests(unittest.TestCase):
         self.assertIsNone(summary["report"])
         self.assertEqual(summary["send_errors"], ["report: SES down"])
         self.assertEqual(self.state.report["slot"], "2026-11-07 11")
+
+
+class ScreenCheckTests(unittest.TestCase):
+    """2026-11-18: every live run also reads the screen as the team sees it and adds the loads
+    the job's own read lacks (356821 was on the page but on no report on 11/16 and 11/17)."""
+
+    def test_merge_adds_what_the_job_read_lacks(self):
+        job = parse_grid(build(without=("354745", "360003", "360007")))
+        full = parse_grid(PAGE)
+        self.assertEqual(merge_missing_rows(job, parse_grid(PAGE)), ["354745", "360003"])  # the bundle child is added, not reported
+        self.assertEqual(len(job.rows), len(full.rows))
+        picked, _w, _c = select_loads(job, NOW)
+        expected, _w, _c = select_loads(full, NOW)
+        self.assertEqual(sorted(l.load_id for l in picked), sorted(l.load_id for l in expected))
+        self.assertEqual(merge_missing_rows(job, parse_grid(PAGE)), [])  # nothing twice
+        # the usual rules still apply to an added row (360004: pickup ETA on the cutoff day)
+        job = parse_grid(build(without=("360004",)))
+        self.assertEqual(merge_missing_rows(job, parse_grid(PAGE)), ["360004"])
+        self.assertNotIn("360004", [l.load_id for l in select_loads(job, NOW)[0]])
+
+    def test_merge_needs_the_columns(self):
+        job = parse_grid(build(without=("354745",)))
+        saved = parse_grid(build(columns=[c for c in COLUMNS if c[0] != "GPSLink"]))
+        self.assertEqual(merge_missing_rows(job, saved), [])
+        self.assertNotIn("354745", [r.load_id for r in job.rows])
+
+    def test_screen_check(self):
+        class Session:
+            def __init__(self, page=PAGE, error=None):
+                self.page, self.error, self.specs = page, error, []
+
+            def fetch_search_html(self, spec):
+                self.specs.append(spec)
+                if self.error:
+                    raise self.error
+                return 200, self.page, {}
+
+        logged = []
+        job = parse_grid(build(without=("352243",)))
+        session = Session()
+        self.assertEqual(tracking_update_alerts.screen_check(session, job, logged.append), ["352243"])
+        self.assertEqual(session.specs[0].extra, {"Menu__ViewFields": list(tracking_update_alerts.EXTRA_VIEW_FIELDS)})  # no dates: as saved
+        self.assertEqual(session.specs[0].saved_id, "2077")
+        self.assertIn("screen check: 13 loads on the screen as the team sees it; 1 missing from the job's read, added: 352243", logged[-1])
+        self.assertEqual(tracking_update_alerts.screen_check(Session(), job, logged.append), [])
+        self.assertIn("none missing from the job's read", logged[-1])
+        # a failed read never stops the run
+        self.assertEqual(tracking_update_alerts.screen_check(Session(error=RuntimeError("HTTP 500")), job, logged.append), [])
+        self.assertIn("screen check failed (HTTP 500); going on with the job's read", logged[-1])
+        self.assertEqual(tracking_update_alerts.screen_check(Session(page=build(columns=[c for c in COLUMNS if c[0] != "status"])),
+                                                         parse_grid(build(without=("352243",))), logged.append), [])
+        self.assertIn("lacks column(s) status; nothing added", logged[-1])
+
+    def test_switch(self):
+        self.assertIn("--no-screen-check", tracking_update_lambda.alert_args("/w", {"TRACK_SCREEN_CHECK": "0"}))
+        self.assertNotIn("--no-screen-check", tracking_update_lambda.alert_args("/w", {}))
+        self.assertNotIn("--no-screen-check", tracking_update_lambda.alert_args("/w", {"TRACK_SCREEN_CHECK": "1"}))
 
 
 class CliTests(unittest.TestCase):
