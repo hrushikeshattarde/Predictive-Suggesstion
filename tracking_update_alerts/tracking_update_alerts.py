@@ -190,9 +190,9 @@ DEFAULT_EXCLUDE_CUSTOMERS = ("81464", "Merchants Automotive")
 #: by customer and dispatch rep. Sent by the run(s) whose Eastern hour is listed in
 #: DEFAULT_REPORT_HOURS ("all" = every run), once per hour slot. 07:00, 11:00, 15:00 and 18:00 ET: the
 #: user's choice (2026-11-09; 10:00 and 16:00 earlier that day, 08:00 before).
-#: Justice Cromwell, the Stellantis mailbox, Brett Booth, Podge Ormsby, Mitchell Meyers and
-#: Stuart Mitchell (the user's list: Justice alone until 2026-11-09 13:35 ET, Stuart added
-#: 2026-11-11).
+#: Justice Cromwell, the Stellantis mailbox, Brett Booth, Podge Ormsby, Mitchell Meyers,
+#: Stuart Mitchell and Gary Horton (the user's list: Justice alone until 2026-11-09 13:35 ET,
+#: Stuart added 2026-11-11, Gary 2026-11-18).
 DEFAULT_REPORT_TO = (
     "justice.cromwell@circledelivers.com",
     "stellantisob@circledelivers.com",
@@ -200,6 +200,7 @@ DEFAULT_REPORT_TO = (
     "pormsby@circledelivers.com",
     "mitchell.meyers@circledelivers.com",
     "smitchell@circledelivers.com",
+    "gary.horton@circledelivers.com",
 )
 DEFAULT_REPORT_HOURS: tuple[int, ...] | str = (7, 11, 15, 18)
 #: The short no-ping report (No Pings, OK, tracking rate only), to Stuart Mitchell alone, at the

@@ -81,8 +81,8 @@ the report (07/11/15/18 ET runs)     the In-Route loads (--report-status) are se
                                      the report only; scanned / with issues / without issues per status, per
                                      customer and per dispatch rep; then every load with no GPS pings + every
                                      driver quiet for more than 11 h (--report-quiet-hours) by customer and
-                                     dispatch rep; To Justice, stellantisob@, Brett Booth, Podge Ormsby and
-                                     Mitchell Meyers, Stuart Mitchell (--report-to); once per hour slot
+                                     dispatch rep; To Justice, stellantisob@, Brett Booth, Podge Ormsby,
+                                     Mitchell Meyers, Stuart Mitchell and Gary Horton (--report-to); once per hour slot
 ```
 
 The comment is the ping as CargoTel prints it plus the place, `2026-11-06 06:12:25-05
@@ -310,7 +310,7 @@ Switches worth knowing: `--days-ahead` (2), `--stale-hours` (4), `--gps-days` (2
 `--only-rep NAME` (`stellantis`, `unassigned` work too), `--only-load ID[,ID]` (the whole run
 limited to those loads), `--max-gps` (400), `--save-html DIR`, `--now ISO`, `--json FILE`;
 for the report `--report-to` (Justice Cromwell, stellantisob@, Brett Booth, Podge Ormsby, Mitchell
-Meyers), `--report-hours` (`7,11,15,18`), `--report-quiet-hours`
+Meyers, Stuart Mitchell, Gary Horton), `--report-hours` (`7,11,15,18`), `--report-quiet-hours`
 (11), `--report-status` (`In-Route`; `""` for none) and `--report` (send it this run).
 
 ## What was verified (2026-11-06)
@@ -444,7 +444,8 @@ so the 15:00 report that day was the first in that shape, to that list, at the n
 
 
 On 2026-11-11 Stuart Mitchell (smitchell@) was added to the report's recipients, at the user's
-request.
+request, and on 2026-11-18 Gary Horton (gary.horton@), also at the user's request (the full
+report only; Stuart's short no-ping report is unchanged).
 
 | Key | What |
 | --- | --- |
