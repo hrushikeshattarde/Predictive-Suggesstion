@@ -164,12 +164,14 @@ loads with issues (41 with no GPS pings, 11 quiet for more than 11 h)`. A run at
 11 h, 57 fine; Kingbee 26, Stellantis 10, Enterprise Utah 5, Kar Korner 5, ...; Victoria
 Storm 20, Juan Bernal 13, Kyle Link 5, ...
 
-### MacroPoint takes steadily tracked loads off the full report (since 2026-11-17)
+### MacroPoint takes the loads it tracks off the full report (since 2026-11-17)
 
 In the full report, a load with no ping on its GPS City/St link, or quiet on it for more
-than 11 hours, is not an issue when MacroPoint pinged it steadily: the report's own steady
-test on MacroPoint's pings (at least 5 in the past 16 hours, none more than 3 hours apart;
-`--report-steady-*`, the default test when the report's is off), with the same phone check
+than 11 hours, is not an issue when MacroPoint tracks it, judged the way the GPS link is:
+MacroPoint pinged it **within the last 11 hours** (`--report-quiet-hours`, since 2026-11-19),
+or pinged it **steadily** before that: the report's own steady test on MacroPoint's pings
+(at least 5 in the past 16 hours, none more than 3 hours apart; `--report-steady-*`, the
+default test when the report's is off). Either way with the same phone check
 as the Location/ETA step (MacroPoint's locator and the CargoTel driver cell must match when
 both are phone numbers). Such loads count as without issues and are not named in the email
 (the intro sentence states the rule; the run's sent_log entry keeps them as
@@ -185,6 +187,10 @@ looked at. Justice's question on 2026-11-17 (354353 was quiet for 11+ hours on t
 but pinging every 20 minutes in MacroPoint, and still listed) made it the steady test for
 both lists. On the 7 AM report of 11/17 that would have taken 6 quiet loads off (356991,
 358548, 355863, 355837, 354353, 358375) and put back 357533 (one MacroPoint ping, 13 h old).
+On 2026-11-19 the 7 AM report still listed 359884 and 354346 as quiet while MacroPoint pinged
+them at 7:00 (62 and 45 pings in 16 hours, each with one overnight gap of 5.3 and 3.7 hours),
+and 357104 as no pings with a MacroPoint ping 8 hours old; the user asked for MacroPoint to be
+judged like the GPS link, so a MacroPoint ping within the 11 hours now counts too.
 
 ### The short no-ping report for Stuart Mitchell (since 2026-11-12 16:36 ET)
 

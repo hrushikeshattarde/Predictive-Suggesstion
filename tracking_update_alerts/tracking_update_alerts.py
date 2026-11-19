@@ -1350,10 +1350,14 @@ def macropoint_covered(loads: list[GpsLoad], mp_history: dict[str, list[MpPing]]
                        quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS, steady: SteadyRule | None = DEFAULT_STEADY
                        ) -> dict[str, MpPing]:
     """``{load_id: MacroPoint's newest ping}`` for the loads the report would list (no GPS-link
-    ping, or quiet for more than ``quiet_hours``) that MacroPoint pinged steadily: the report's
-    steady rule on MacroPoint's own pings (at least 5 in the past 16 hours, none more than 3
-    hours apart), and, when MacroPoint's locator and the CargoTel driver cell are both phone
-    numbers, the same phone. The report does not list them as issues (Justice, 2026-11-17)."""
+    ping, or quiet for more than ``quiet_hours``) that MacroPoint tracks, judged the way the
+    GPS link is: MacroPoint pinged within the last ``quiet_hours`` (11), or pinged steadily
+    before that (the report's steady rule on MacroPoint's own pings: at least 5 in the past
+    16 hours, none more than 3 hours apart); and, when MacroPoint's locator and the CargoTel
+    driver cell are both phone numbers, the same phone. The report does not list them as
+    issues (Justice, 2026-11-17: steady; the user, 2026-11-19: also a ping within 11 hours,
+    as for the GPS link, after 359884 and 354346 stayed on the 7 AM list while MacroPoint
+    pinged them at 7:00, each with one overnight gap of more than 3 hours)."""
 
     if not mp_history:
         return {}
@@ -1366,7 +1370,10 @@ def macropoint_covered(loads: list[GpsLoad], mp_history: dict[str, list[MpPing]]
         if not pings:
             continue
         newest = max(pings, key=lambda p: p.when)
-        if macropoint_covers(load, newest, now, max_age_hours=rule.hours) and rule.applies_to([p.when for p in pings], now):
+        if not macropoint_covers(load, newest, now, max_age_hours=max(rule.hours, quiet_hours)):
+            continue
+        recent = (now - newest.when).total_seconds() <= quiet_hours * 3600
+        if recent or rule.applies_to([p.when for p in pings], now):
             out[load.load_id] = newest
     return out
 
@@ -1671,8 +1678,8 @@ def compose_report(
              f"before {cutoff:%m/%d/%Y}{excluded}. Each load's GPS history (its \"GPS City/St Link\") was checked over the last "
              f"{gps_days} days; a load has an issue when it has no ping at all or its last ping is older than {hours} hours"
              + (f" (unless the driver pinged steadily before that: {steady.describe()})" if steady and steady.hours > 0 else "")
-             + (f"; a load with no ping, or quiet, on the GPS link is not an issue when MacroPoint pinged it steadily "
-                f"({mp_rule(steady).describe()})" if mp_covered is not None else "")
+             + (f"; a load with no ping, or quiet, on the GPS link is not an issue when MacroPoint pinged it in the last "
+                f"{hours} hours or steadily before that ({mp_rule(steady).describe()})" if mp_covered is not None else "")
              + ". The "
              f"tracking rate is the share of the scanned loads without an issue.")
     sections = [

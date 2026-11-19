@@ -929,18 +929,19 @@ class NoPingReportTests(unittest.TestCase):
 
 class MacroPointInReportTests(unittest.TestCase):
     """The full report: a load with no GPS-link ping, or quiet on it, is not an issue when
-    MacroPoint pinged it steadily (the report's steady rule on MacroPoint's pings, phone
-    checked; Justice, 2026-11-17); Stuart's short report is unchanged."""
+    MacroPoint pinged it in the last 11 hours or steadily before that (the report's steady
+    rule on MacroPoint's pings), phone checked (Justice, 2026-11-17; the 11 hours since
+    2026-11-19); Stuart's short report is unchanged."""
 
     @staticmethod
     def mp(load_id, minutes_ago, city="Macon", state="GA", locator=""):
         return MpPing(load_id, (NOW - timedelta(minutes=minutes_ago)).astimezone(timezone.utc), city, state, "", 32.8, -83.6, locator, "Ping")
 
-    def steady(self, load_id, locator="", every=20, hours=16, skip=None):
-        """A ping every ``every`` minutes over the past ``hours``, the newest 5 minutes ago;
-        ``skip`` = (from, to) minutes ago with no pings."""
+    def steady(self, load_id, locator="", every=20, hours=16, skip=None, newest=5):
+        """A ping every ``every`` minutes over the past ``hours``, the newest ``newest`` minutes
+        ago; ``skip`` = (from, to) minutes ago with no pings."""
         out = []
-        for m in range(5, int(hours * 60), every):
+        for m in range(newest, int(hours * 60), every):
             if skip and skip[0] <= m <= skip[1]:
                 continue
             out.append(self.mp(load_id, m, locator=locator))
@@ -954,35 +955,41 @@ class MacroPointInReportTests(unittest.TestCase):
 
     def history(self):
         return {"354745": self.steady("354745", locator="2242849908"),        # no GPS-link ping, same phone: covered
-                "352243": self.steady("352243"),                              # quiet 19 h on the GPS link: covered too
-                "360002": [self.mp("360002", 30), self.mp("360002", 10)],     # two pings: not steady
+                "352243": self.steady("352243", newest=12 * 60),              # quiet 19 h on the GPS link; MacroPoint steady
+                                                                              # until 12 h ago: covered (steady, not recent)
+                "360002": [self.mp("360002", 13 * 60), self.mp("360002", 12 * 60)],  # two pings 12-13 h ago: not
                 "360008": self.steady("360008", locator="9999999999"),        # another phone: not
-                "360003": self.steady("360003", skip=(240, 600)),             # a 6-hour gap: not steady
+                "360003": self.steady("360003", skip=(240, 600)),             # a 6-hour gap, but pinging now: covered
                 "352242": self.steady("352242")}                              # pinging on the GPS link: no issue anyway
 
     def test_covered(self):
         scanned, _c = self.scanned()
         covered = macropoint_covered(scanned, self.history(), NOW)
-        self.assertEqual(sorted(covered), ["352243", "354745"])
+        self.assertEqual(sorted(covered), ["352243", "354745", "360003"])
         self.assertEqual(covered["354745"].when, (NOW - timedelta(minutes=5)).astimezone(timezone.utc))  # the newest ping
-        # the report's own steady rule is the test (a looser one lets the two pings count)
+        # the report's own steady rule is the test (a looser one lets the two old pings count)
         self.assertEqual(sorted(macropoint_covered(scanned, self.history(), NOW, steady=SteadyRule(16, 2, 3))),
-                         ["352243", "354745", "360002"])
+                         ["352243", "354745", "360002", "360003"])
         # with the report's steady rule off, MacroPoint is still held to the default one
-        self.assertEqual(sorted(macropoint_covered(scanned, self.history(), NOW, steady=None)), ["352243", "354745"])
+        self.assertEqual(sorted(macropoint_covered(scanned, self.history(), NOW, steady=None)), ["352243", "354745", "360003"])
         self.assertEqual(macropoint_covered(scanned, None, NOW), {})
+        # one ping is enough when it is within the 11 hours, like on the GPS link (2026-11-19)
+        self.assertEqual(sorted(macropoint_covered(scanned, {"360002": [self.mp("360002", 10 * 60 + 59)]}, NOW)), ["360002"])
+        self.assertEqual(macropoint_covered(scanned, {"360002": [self.mp("360002", 11 * 60 + 5)]}, NOW), {})
+        self.assertEqual(macropoint_covered(scanned, {"360002": [self.mp("360002", 9 * 60)]}, NOW, quiet_hours=8), {})
+        # a recent ping from another phone still does not count
+        self.assertEqual(macropoint_covered(scanned, {"360008": [self.mp("360008", 5, locator="9999999999")]}, NOW), {})
 
     def test_report(self):
         scanned, counts = self.scanned()
         covered = macropoint_covered(scanned, self.history(), NOW)
         email = compose_report(scanned, now=NOW, to=["justice.cromwell@circledelivers.com"], reps=REPS, counts=counts, mp_covered=covered)
-        self.assertEqual(email.subject, "GPS tracking report Fri 11/06 09:00: 3 of 11 loads with issues (2 with no GPS pings, 1 quiet for more than 11 h)")
-        self.assertNotIn("354745", email.load_ids)
-        self.assertNotIn("352243", email.load_ids)
-        self.assertIn("a load with no ping, or quiet, on the GPS link is not an issue when MacroPoint pinged it steadily "
-                      "(at least 5 pings in the past 16 hours, none more than 3 hours apart)", email.text)
+        self.assertEqual(email.subject, "GPS tracking report Fri 11/06 09:00: 2 of 11 loads with issues (2 with no GPS pings)")
+        self.assertEqual(email.load_ids, ["360008", "360002"])
+        self.assertIn("a load with no ping, or quiet, on the GPS link is not an issue when MacroPoint pinged it in the last 11 hours "
+                      "or steadily before that (at least 5 pings in the past 16 hours, none more than 3 hours apart)", email.text)
         # not named anywhere in the email (Justice, 2026-11-18: a "not counted" line read as still on the report)
-        for load_id in ("354745", "352243"):
+        for load_id in ("354745", "352243", "360003"):
             self.assertNotIn(load_id, email.text)
             self.assertNotIn(load_id, email.html)
         self.assertNotIn("NOT COUNTED", email.text)
@@ -1013,13 +1020,15 @@ class MacroPointInReportTests(unittest.TestCase):
                        for k, v in self.history().items()}
             newest = {k: v[-1] for k, v in history.items()}
             summary, sent = run(mp_pings=newest, mp_history=history)
-            self.assertEqual(summary["report"]["macropoint_not_counted"], ["352243", "354745"])
+            self.assertEqual(summary["report"]["macropoint_not_counted"], ["352243", "354745", "360003"])
             self.assertNotIn("354745", summary["report"]["never"])
             self.assertNotIn("352243", summary["report"]["quiet"])
+            self.assertNotIn("360003", summary["report"]["quiet"])
             self.assertIn("354745", sent["noping-report"].load_ids)
-            # one ping per load (no history): not steady, nothing taken off
+            # one ping per load (no history): only a ping within the 11 hours counts
             summary, sent = run(mp_pings=newest)
-            self.assertEqual(summary["report"]["macropoint_not_counted"], [])
+            self.assertEqual(summary["report"]["macropoint_not_counted"], ["354745", "360003"])
+            self.assertIn("352243", summary["report"]["quiet"])
             summary, sent = run(mp_pings=newest, mp_history=history, report_macropoint=False)
             self.assertIn("354745", summary["report"]["never"])
             self.assertIn("352243", summary["report"]["quiet"])
