@@ -38,7 +38,7 @@ Environment variables::
     TRACK_SCREEN_CHECK      "0" stops reading the screen as the team sees it as well (by default its loads missing
                             from the job's read are added, since 2026-11-18)
     TRACK_NOPING_REPORT_TO / _HOURS  the short no-ping report (No Pings, OK, tracking rate): recipients (default Stuart
-                            Mitchell) and hours (default 7,11,15,18); "-" = nobody / never
+                            Mitchell and Justice Cromwell) and hours (default 7,11,15,18); "-" = nobody / never
     TRACK_REPORT_STEADY_HOURS / _PINGS / _GAP_HOURS  a quiet load is not a report issue when its driver pinged steadily:
                             at least _PINGS pings in the past _HOURS, none more than _GAP_HOURS apart (16 / 5 / 3; hours 0 = off)
     TRACK_SAVE_PAGES        "1" archives the fetched pages

@@ -196,7 +196,8 @@ judged like the GPS link, so a MacroPoint ping within the 11 hours now counts to
 ### The short no-ping report for Stuart Mitchell (since 2026-11-12 16:36 ET)
 
 Asked for on 2026-11-12: a copy of the report with only No Pings, OK and the tracking rate, to
-Stuart Mitchell (smitchell@) alone. It goes out from the same runs as the full report (07:00,
+Stuart Mitchell (smitchell@) alone; Justice Cromwell (justice.cromwell@) added on 2026-11-20 at
+the user's request. It goes out from the same runs as the full report (07:00,
 11:00, 15:00, 18:00 ET; `--noping-report-hours`, `TRACK_NOPING_REPORT_HOURS`), once per hour
 slot (`alert_state.json` "noping_report"), recipients `--noping-report-to` /
 `TRACK_NOPING_REPORT_TO`; `--noping-report` or a Lambda event `{"noping_report": true}` sends

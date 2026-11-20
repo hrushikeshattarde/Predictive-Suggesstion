@@ -857,13 +857,14 @@ class NoPingReportTests(unittest.TestCase):
         extra, _w2, _c2 = select_loads(parse_grid(PAGE), NOW, statuses=("In-Route",))
         check_gps(extra, fetch_gps, NOW)
         email = compose_noping_report(loads + extra, now=NOW, to=list(DEFAULT_NOPING_REPORT_TO), counts=counts)
-        self.assertEqual(DEFAULT_NOPING_REPORT_TO, ("smitchell@circledelivers.com",))
-        self.assertEqual((email.key, email.to, email.cc), ("noping-report", ["smitchell@circledelivers.com"], []))
+        self.assertEqual(DEFAULT_NOPING_REPORT_TO, ("smitchell@circledelivers.com", "justice.cromwell@circledelivers.com"))
+        self.assertEqual((email.key, email.to, email.cc),
+                         ("noping-report", ["smitchell@circledelivers.com", "justice.cromwell@circledelivers.com"], []))
         # 11 loads: 3 no pings, 1 unreadable (left out), 7 with pings -> 7 of 10 = 70.00%
         self.assertEqual(email.subject, "GPS no-ping report Fri 11/06 09:00: 3 of 10 loads with no GPS pings (70.00% tracking)")
         self.assertEqual(email.load_ids, ["360008", "360002", "354745"])
         text = email.text
-        self.assertTrue(text.startswith("Hi Stuart,\n"))
+        self.assertTrue(text.startswith("Hi Stuart and Justice,\n"))
         self.assertIn("OK = at least one ping in that time; the tracking rate is OK out of No Pings + OK.", text)
         self.assertIn("  status      no pings  OK  tracking rate\n", text)
         self.assertIn("  Dispatched         2   6         75.00%\n", text)
@@ -899,7 +900,7 @@ class NoPingReportTests(unittest.TestCase):
 
             summary, sent = run(NOW.replace(hour=7))
             self.assertEqual([e.key for e in sent], ["report", "noping-report"])
-            self.assertEqual(sent[1].to, ["smitchell@circledelivers.com"])
+            self.assertEqual(sent[1].to, ["smitchell@circledelivers.com", "justice.cromwell@circledelivers.com"])
             self.assertEqual(state.noping_report["slot"], "2026-11-06 07")
             self.assertEqual(AlertState(os.path.join(tmp, "a.json")).noping_report["slot"], "2026-11-06 07")
             summary, sent = run(NOW.replace(hour=7, minute=30))

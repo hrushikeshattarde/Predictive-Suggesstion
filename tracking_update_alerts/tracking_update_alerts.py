@@ -203,9 +203,9 @@ DEFAULT_REPORT_TO = (
     "gary.horton@circledelivers.com",
 )
 DEFAULT_REPORT_HOURS: tuple[int, ...] | str = (7, 11, 15, 18)
-#: The short no-ping report (No Pings, OK, tracking rate only), to Stuart Mitchell alone, at the
-#: same hours (the user's request, 2026-11-12).
-DEFAULT_NOPING_REPORT_TO = ("smitchell@circledelivers.com",)
+#: The short no-ping report (No Pings, OK, tracking rate only), to Stuart Mitchell, at the same
+#: hours (the user's request, 2026-11-12); Justice Cromwell added 2026-11-20 (the user's request).
+DEFAULT_NOPING_REPORT_TO = ("smitchell@circledelivers.com", "justice.cromwell@circledelivers.com")
 DEFAULT_NOPING_REPORT_HOURS: tuple[int, ...] | str = (7, 11, 15, 18)
 DEFAULT_REPORT_QUIET_HOURS = 11.0
 #: A load quiet for more than DEFAULT_REPORT_QUIET_HOURS is still not an issue when its driver
@@ -2532,7 +2532,8 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
     parser.add_argument("--report-quiet-hours", type=float, default=DEFAULT_REPORT_QUIET_HOURS,
                         help="the report lists the drivers quiet for longer than this (default 11)")
     parser.add_argument("--noping-report-to", default=",".join(DEFAULT_NOPING_REPORT_TO), metavar="ADDR[,ADDR]",
-                        help="who gets the short no-ping report (No Pings, OK, tracking rate; default Stuart Mitchell; \"\" for nobody)")
+                        help="who gets the short no-ping report (No Pings, OK, tracking rate; default Stuart Mitchell and Justice "
+                             "Cromwell; \"\" for nobody)")
     parser.add_argument("--noping-report-hours", default=",".join(str(h) for h in DEFAULT_NOPING_REPORT_HOURS), metavar="H[,H]|all|never",
                         help="the run(s) that send the no-ping report, by hour of day (default 7,11,15,18)")
     parser.add_argument("--noping-report", action="store_true", help="send the no-ping report this run whatever the hour")
