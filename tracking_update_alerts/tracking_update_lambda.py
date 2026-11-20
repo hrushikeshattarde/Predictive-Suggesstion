@@ -33,7 +33,8 @@ Environment variables::
     TRACK_REPORT_HOURS      Eastern hour(s) whose run sends the report: "7,11,15,18" (default), "8", "all", "-" (never)
     TRACK_REPORT_QUIET_HOURS  the report lists drivers quiet for longer than this (default 11)
     TRACK_REPORT_STATUS     statuses scanned for the report only, no comments or alerts (default In-Route; "-" for none)
-    TRACK_REPORT_MACROPOINT "0" stops taking loads MacroPoint pinged steadily off the full report's issue lists
+    TRACK_REPORT_MACROPOINT "0" ignores MacroPoint in both reports (the full report's issue lists; the short report's
+                            No Pings, where a MacroPoint ping in the GPS window counts as OK since 2026-11-20)
     TRACK_SCREEN_CHECK      "0" stops reading the screen as the team sees it as well (by default its loads missing
                             from the job's read are added, since 2026-11-18)
     TRACK_NOPING_REPORT_TO / _HOURS  the short no-ping report (No Pings, OK, tracking rate): recipients (default Stuart

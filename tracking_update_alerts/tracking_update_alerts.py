@@ -1378,6 +1378,29 @@ def macropoint_covered(loads: list[GpsLoad], mp_history: dict[str, list[MpPing]]
     return out
 
 
+def macropoint_seen(loads: list[GpsLoad], mp_history: dict[str, list[MpPing]] | None, now: datetime,
+                    hours: float = DEFAULT_GPS_DAYS * 24) -> dict[str, MpPing]:
+    """``{load_id: MacroPoint's newest ping}`` for the loads with no GPS-link ping that MacroPoint
+    pinged at least once in the last ``hours`` (the GPS window, 2 days), with the same phone
+    when MacroPoint's locator and the CargoTel driver cell are both phone numbers. The short
+    no-ping report counts them as OK, the way it counts any GPS-link ping in the window
+    (Stuart, 2026-11-20: "it's not counting mp ping")."""
+
+    if not mp_history:
+        return {}
+    out: dict[str, MpPing] = {}
+    for load in loads:
+        if load.tracking != NEVER:
+            continue
+        pings = [p for p in mp_history.get(load.load_id) or () if p.when and p.when <= now + timedelta(minutes=15)]
+        if not pings:
+            continue
+        newest = max(pings, key=lambda p: p.when)
+        if macropoint_covers(load, newest, now, max_age_hours=hours):
+            out[load.load_id] = newest
+    return out
+
+
 def steady_quiet_loads(loads: list[GpsLoad], now: datetime, quiet_hours: float = DEFAULT_REPORT_QUIET_HOURS,
                        steady: SteadyRule | None = DEFAULT_STEADY) -> list[GpsLoad]:
     """The loads quiet for more than ``quiet_hours`` that the steady rule takes off the list."""
@@ -1768,13 +1791,16 @@ def compose_noping_report(
     report_statuses: tuple[str, ...] | list[str] = DEFAULT_REPORT_STATUSES,
     exclude_customers: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_CUSTOMERS,
     counts: dict[str, int] | None = None,
+    mp_ok: dict[str, MpPing] | None = None,
 ) -> Email:
     """The short version of the report (asked for Stuart Mitchell, 2026-11-12): the same loads,
     but only No Pings, OK and the tracking rate per status, customer and dispatch rep, and the
-    list of the loads with no GPS pings. OK = the driver pinged at least once in the GPS window."""
+    list of the loads with no GPS pings. OK = the driver pinged at least once in the GPS window;
+    with ``mp_ok`` (:func:`macropoint_seen`, since 2026-11-20) a MacroPoint ping in that window
+    counts too, and those loads are not listed."""
 
-    breakdown = report_breakdowns(loads, now, DEFAULT_REPORT_QUIET_HOURS, tuple(statuses) + tuple(report_statuses), None)
-    never = sorted((l for l in loads if l.tracking == NEVER), key=_report_key)
+    breakdown = report_breakdowns(loads, now, DEFAULT_REPORT_QUIET_HOURS, tuple(statuses) + tuple(report_statuses), None, mp_ok)
+    never = sorted((l for l in loads if l.tracking == NEVER and not (mp_ok and l.load_id in mp_ok)), key=_report_key)
     total = breakdown["status"][-1][1]
     n_never, n_ok, rate = _np_tally(total)
     stamp = f"{now:%a %m/%d %H:%M}"
@@ -1787,9 +1813,14 @@ def compose_noping_report(
         excluded = f"; {counts['excluded']} {', '.join(left_out)} load{'s' if counts['excluded'] != 1 else ''} left out"
     scanned_desc = " and ".join(f"{t['scanned']} {label}" for label, t in breakdown["status"][:-1]) + " loads"
     cutoff = eta_cutoff(now, days_ahead)
+    if mp_ok is not None:
+        rule = (f"No Pings = no position in the last {gps_days} days, neither on the load's GPS City/St link nor from MacroPoint; "
+                f"OK = at least one ping in that time from either (MacroPoint's only when it tracks the driver cell on the load)")
+    else:
+        rule = (f"No Pings = no position on the load's GPS City/St link in the last {gps_days} days; OK = at least one ping in "
+                f"that time")
     intro = (f"GPS no-ping report as of {_fmt_when(now)}: {SEARCH_NAME} ({SEARCH_PATH}) shows {scanned_desc} with a pickup ETA before "
-             f"{cutoff:%m/%d/%Y}{excluded}. No Pings = no position on the load's GPS City/St link in the last {gps_days} days; OK = at "
-             f"least one ping in that time; the tracking rate is OK out of No Pings + OK.")
+             f"{cutoff:%m/%d/%Y}{excluded}. {rule}; the tracking rate is OK out of No Pings + OK.")
     by_customer = [(label, t) for label, _per, t in breakdown["customer"]]
     by_rep = [(label, t) for label, _per, t in breakdown["dispatch_rep"]]
     by_customer.sort(key=lambda r: (-r[1][NEVER], -r[1]["scanned"], r[0].lower()))
@@ -1802,7 +1833,8 @@ def compose_noping_report(
     text_parts += ["SCANNED"] + _np_table_text("status", breakdown["status"], total=False) + [""]
     text_parts += ["BY CUSTOMER"] + _np_table_text("customer", by_customer, total=True) + [""]
     text_parts += ["BY DISPATCH REP"] + _np_table_text("dispatch rep", by_rep, total=True) + [""]
-    text_parts += _report_text_section("No GPS pings", never, now, f"No position from the tracking app in the last {gps_days} days.")
+    hint = (f"No position from the tracking app{' or MacroPoint' if mp_ok is not None else ''} in the last {gps_days} days.")
+    text_parts += _report_text_section("No GPS pings", never, now, hint)
     if unknown:
         text_parts += [f"GPS PAGE UNREADABLE ({len(unknown)}, not counted): " + ", ".join(l.load_id for l in unknown), ""]
     text_parts.append(trailer)
@@ -1813,7 +1845,7 @@ def compose_noping_report(
               '<h3 style="margin:16px 0 4px">By customer</h3>' + _np_table_html("Customer", by_customer, total=True),
               '<h3 style="margin:16px 0 4px">By dispatch rep</h3>' + _np_table_html("Dispatch rep", by_rep, total=True),
               f'<h3 style="margin:20px 0 2px">No GPS pings ({len(never)})</h3><p style="margin:0 0 6px;color:#444">'
-              f"{esc(f'No position from the tracking app in the last {gps_days} days.')}</p>"
+              f"{esc(hint)}</p>"
               + (_report_html_table(never, now, with_ping=False) if never else "<p>none</p>")]
     if unknown:
         blocks.append(f'<p style="color:#444">GPS page unreadable ({len(unknown)}, not counted): '
@@ -2254,6 +2286,10 @@ def run_once(
                 state.mark(load, now)
             append_log(sent_log, entry)
 
+    # MacroPoint's pings for both reports: every stored ping, or just the newest per load
+    history = mp_history if mp_history is not None else (
+        {k: [v] for k, v in mp_pings.items()} if mp_pings is not None else None)
+
     # 2. the report for the operations manager: the whole screen, by customer and dispatch rep
     summary["report"] = None
     due = report_due_now
@@ -2263,9 +2299,7 @@ def run_once(
         log(f"report: already sent at {state.report.get('at')}; skipped")
     elif due:
         scanned = loads + extra
-        history = mp_history if mp_history is not None else (
-            {k: [v] for k, v in mp_pings.items()} if mp_pings is not None else None)
-        mp_covered = (macropoint_covered(scanned, history, now, report_quiet_hours, report_steady)
+        mp_covered =(macropoint_covered(scanned, history, now, report_quiet_hours, report_steady)
                       if (report_macropoint and history is not None) else None)
         never, quiet = report_loads(scanned, now, report_quiet_hours, report_steady, mp_covered)
         rested = steady_quiet_loads(scanned, now, report_quiet_hours, report_steady)
@@ -2304,9 +2338,11 @@ def run_once(
     elif noping_due_now and record and not force_noping_report and state.noping_report_sent(now):
         log(f"no-ping report: already sent at {state.noping_report.get('at')}; skipped")
     elif noping_due_now:
+        mp_ok = (macropoint_seen(loads + extra, history, now, gps_days * 24)
+                 if (report_macropoint and history is not None) else None)
         email = compose_noping_report(loads + extra, now=now, to=list(noping_report_to), gps_days=gps_days, days_ahead=days_ahead,
                                       statuses=statuses, report_statuses=report_statuses, exclude_customers=exclude_customers,
-                                      counts={"excluded": counts["excluded"] + extra_counts["excluded"]})
+                                      counts={"excluded": counts["excluded"] + extra_counts["excluded"]}, mp_ok=mp_ok)
         if redirect_to:
             email = redirect(email, redirect_to)
         try:
@@ -2318,7 +2354,7 @@ def run_once(
             verb = "no-ping report sent" if record else ("no-ping report test copy sent" if redirect_to else "no-ping report dry run")
             log(f"{verb}: {email.subject} -> to {', '.join(email.to)} [{message_id}]")
             entry = {"at": now.isoformat(timespec="seconds"), "noping_report": True, "to": email.to, "subject": email.subject,
-                     "never": email.load_ids, "message_id": message_id, "sent": record,
+                     "never": email.load_ids, "macropoint_ok": sorted(mp_ok or {}), "message_id": message_id, "sent": record,
                      "redirected_to": list(redirect_to) if redirect_to else None}
             summary["noping_report"] = entry
             if record:
@@ -2501,7 +2537,8 @@ def main(argv: list[str] | None = None, checkpoint: Callable[[], None] | None = 
                         help="the run(s) that send the no-ping report, by hour of day (default 7,11,15,18)")
     parser.add_argument("--noping-report", action="store_true", help="send the no-ping report this run whatever the hour")
     parser.add_argument("--report-no-macropoint", action="store_true",
-                        help="do not take loads MacroPoint pinged steadily off the full report's issue lists")
+                        help="ignore MacroPoint in both reports (by default it takes loads it tracks off the full report's issue "
+                             "lists, and a MacroPoint ping in the GPS window counts as OK in the short no-ping report)")
     parser.add_argument("--report-steady-hours", type=float, default=DEFAULT_REPORT_STEADY_HOURS,
                         help="a quiet load is not an issue when its driver pinged steadily in this many past hours (default 16; 0 = off)")
     parser.add_argument("--report-steady-pings", type=int, default=DEFAULT_REPORT_STEADY_PINGS,

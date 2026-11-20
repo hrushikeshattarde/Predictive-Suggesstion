@@ -176,7 +176,8 @@ as the Location/ETA step (MacroPoint's locator and the CargoTel driver cell must
 both are phone numbers). Such loads count as without issues and are not named in the email
 (the intro sentence states the rule; the run's sent_log entry keeps them as
 `macropoint_not_counted`). Until 2026-11-18 they were named in a "Not counted as issues,
-tracked in MacroPoint" line, which read as still being on the report (Justice on 359683). Stuart's short report is unchanged (it still counts them as No Pings).
+tracked in MacroPoint" line, which read as still being on the report (Justice on 359683).
+Stuart's short report has its own MacroPoint rule since 2026-11-20 (see below).
 `--report-no-macropoint` / `TRACK_REPORT_MACROPOINT=0` turn it off. The pings come from the
 receiver's files (`load_histories`: the newest ping and up to `MP_HISTORY`, 100, before it);
 the Lambda handler copies the files of the last 48 hours.
@@ -205,6 +206,15 @@ rate** is OK out of No Pings + OK (unreadable GPS pages left out). The email has
 Status / By customer / By dispatch rep tables with just those three columns, then the list of
 the no-ping loads. A marked test copy went to Stuart at 16:35 ET on 2026-11-12 (22 of 145 loads
 with no GPS pings, 84.83% tracking).
+
+**MacroPoint counts as OK (since 2026-11-20).** Stuart on the 7 AM report of 11/20: "Report is
+broke, it's not counting mp ping. Anything with no note on the side has 0 vis" (the loads whose
+last dispatch comment is a MacroPoint position were listed as No Pings). A load with no GPS-link
+ping now counts as OK when MacroPoint pinged it at least once in the same 2 days, with the same
+phone check as everywhere else (`macropoint_seen`); it is not listed, the intro and the list's
+hint say "neither on the load's GPS City/St link nor from MacroPoint", and the sent_log entry
+keeps them as `macropoint_ok`. `--report-no-macropoint` / `TRACK_REPORT_MACROPOINT=0` turn
+MacroPoint off in both reports.
 
 ### Steady pinging before a quiet spell is not a report issue (since 2026-11-12 16:26 ET)
 
