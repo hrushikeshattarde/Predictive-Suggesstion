@@ -6,6 +6,7 @@ tables, and the transport and the comment poster record what they were given."""
 
 import copy
 import json
+import re
 import os
 import shutil
 import sys
@@ -123,8 +124,9 @@ def last_comment(at, by, text):
 def row(n, load_id, dispatch_rep, eta, *, status="Dispatched", customer="Stellantis (fca)", cons_id="62943", consignor="N/A",
         sales1="", sales2="", carrier="100 Miles Transport LLC", origin="Elwood, IL", dest_name="Dodge Of Burnsville Inc",
         dest="Burnsville, MN", driver="OYUNBAATAR, ERDENETUVSHIN", phone="(224) 284-9908", link_class="LinkBundleParent",
-        gps=True, location="ELWOOD, IL", comment=("", "", ""), columns=COLUMNS):
+        gps=True, location="ELWOOD, IL", comment=("", "", ""), carrier_update="", columns=COLUMNS):
     values = {
+        "CarrierUpdate": carrier_update,
         "sales_rep1": sales1, "sales_rep2": sales2, "original_consignor": customer, "cons_id": cons_id, "consignor": consignor,
         "dispatch_rep": dispatch_rep, "status": status, "bundleparent": "", "carriername": carrier, "originCityState": origin,
         "destination": (f"<b>{dest_name}</b><br>{dest}" if dest_name else dest), "pickiup_eta_datetime": eta, "driver_name": driver,
@@ -920,6 +922,38 @@ class NoPingReportTests(unittest.TestCase):
     @staticmethod
     def mp(load_id, hours_ago, locator=""):
         return MpPing(load_id, (NOW - timedelta(hours=hours_ago)).astimezone(timezone.utc), "Macon", "GA", "", 32.8, -83.6, locator, "Ping")
+
+    def test_carrier_update_column(self):
+        """2026-11-20: the short report's list shows the newest "Carrier Update" note (the reps'
+        manual updates in transit) right of the last dispatch comment; the full report does not."""
+        self.assertIn("CarrierUpdate", tracking_update_alerts.EXTRA_VIEW_FIELDS)
+        page = build(columns=COLUMNS + [("CarrierUpdate", "Carrier Update")],
+                     replace={"354745": {"carrier_update": "2026-11-05 17:51:31.646983-05 Friday pick up<br>"
+                                                           "2026-11-04 13:17:57.749428-05 Tracking Matfield Green KS"},
+                              "360002": {"carrier_update": "no time on this one"}})
+        loads, _w, counts, _e = checked_loads(html=page)
+        extra, _w2, _c2 = select_loads(parse_grid(page), NOW, statuses=("In-Route",))
+        check_gps(extra, fetch_gps, NOW)
+        got = by_id(loads + extra)
+        self.assertEqual((got["354745"].carrier_update, got["354745"].carrier_update_at), ("Friday pick up", "Thu 11/05 17:51"))
+        self.assertEqual((got["360002"].carrier_update, got["360002"].carrier_update_at), ("no time on this one", ""))
+        self.assertEqual((got["352242"].carrier_update, got["352242"].carrier_update_at), ("", ""))
+        email = compose_noping_report(loads + extra, now=NOW, to=["smitchell@circledelivers.com"], counts=counts)
+        headers = re.findall(r"border-bottom:2px solid #999\">([^<]+)</th>", email.html)
+        self.assertEqual(headers[-2:], ["Last dispatch comment", "Carrier update"])
+        self.assertIn("Friday pick up<br><small>Thu 11/05 17:51</small>", email.html)
+        self.assertNotIn("Tracking Matfield Green KS", email.html)  # the newest note only
+        self.assertIn("carrier update (Thu 11/05 17:51): Friday pick up", email.text)
+        self.assertIn("carrier update: no time on this one", email.text)
+        # the full report is unchanged
+        full = compose_report(loads + extra, now=NOW, to=["x@y.com"], reps=REPS, counts=counts)
+        self.assertNotIn("Carrier update", full.html)
+        self.assertNotIn("carrier update", full.text)
+        # a page without the column: the short report still has it, empty
+        loads, _w, counts, _e = checked_loads()
+        email = compose_noping_report(loads, now=NOW, to=["smitchell@circledelivers.com"], counts=counts)
+        self.assertIn("Carrier update</th>", email.html)
+        self.assertNotIn("carrier update", email.text)
 
     def test_macropoint_counts_as_ok(self):
         """Stuart, 2026-11-20 ("it's not counting mp ping"): a MacroPoint ping in the GPS window

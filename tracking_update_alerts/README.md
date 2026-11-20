@@ -217,6 +217,12 @@ hint say "neither on the load's GPS City/St link nor from MacroPoint", and the s
 keeps them as `macropoint_ok`. `--report-no-macropoint` / `TRACK_REPORT_MACROPOINT=0` turn
 MacroPoint off in both reports.
 
+**Carrier update column (since 2026-11-20).** The short report's list has a "Carrier update"
+column right of "Last dispatch comment": the newest note of the screen's "Carrier Update"
+column (`CarrierUpdate`, added to `EXTRA_VIEW_FIELDS`; every carrier update on the load,
+newest first, "2026-11-19 17:51:31.646983-05 Friday pick up"), where the reps write their
+manual updates in transit, with its time ("Thu 11/19 17:51"). The full report is unchanged.
+
 ### Steady pinging before a quiet spell is not a report issue (since 2026-11-12 16:26 ET)
 
 Asked for by the operations team on 2026-11-12: load 356838 was listed as quiet for more than

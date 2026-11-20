@@ -221,7 +221,9 @@ DEFAULT_REPORT_STATUSES = ("In-Route",)
 #: Columns added to the saved view on the GET (extras only, see cargotel_search notes):
 #: the sales reps, and the customer. ``consignor`` reads "N/A" on EDI loads (every
 #: Stellantis load); ``original_consignor`` and ``cons_id`` carry the real customer.
-EXTRA_VIEW_FIELDS = ("sales_rep1", "sales_rep2", "original_consignor", "cons_id", "consignor")
+#: ``CarrierUpdate`` ("Carrier Update", display only: every carrier update on the load, newest
+#: first, "2026-11-19 17:51:31.646983-05 Friday pick up") since 2026-11-20, for the short report.
+EXTRA_VIEW_FIELDS = ("sales_rep1", "sales_rep2", "original_consignor", "cons_id", "consignor", "CarrierUpdate")
 REQUIRED_COLUMNS = ("pickiup_eta_datetime", "GPSLink", "DispatchCmt_IDLastCmt", "dispatch_rep", "status")
 #: The screen's "CargoTel IDs" filter (a textarea, one load id per line). Sent on the GET it
 #: narrows the saved search to those loads, and the page's Menu_alt form shrinks with it
@@ -238,6 +240,8 @@ UNKNOWN = "unknown"
 _STAMP_RE = re.compile(r"^\s*(\d{1,2}/\d{1,2}/\d{4})(?:\s+(\d{1,2}:\d{2}))?")
 _PING_STAMP_RE = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\s*([+-])(\d{2}):?(\d{2})?)?")
 _HREF_RE = re.compile(r'href="([^"]+)"', re.I)
+#: One line of the "Carrier Update" column: "2026-11-19 17:51:31.646983-05 Friday pick up".
+_CARRIER_UPDATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?(?:[+-]\d{2}(?::?\d{2})?)?\s*(.*)$", re.S)
 _TABLE_RE = re.compile(r"<table\b.*?</table>", re.S | re.I)
 _TR_RE = re.compile(r"<tr\b.*?</tr>", re.S | re.I)
 _TD_RE = re.compile(r"<td\b[^>]*>(.*?)</td>", re.S | re.I)
@@ -391,6 +395,9 @@ class GpsLoad:
     last_comment: str
     sales_rep: str | None = None
     sales_rep2: str | None = None
+    #: The newest "Carrier Update" note (the reps' manual updates in transit) and its time.
+    carrier_update: str = ""
+    carrier_update_at: str = ""
     pings: list[Ping] = field(default_factory=list)
     gps_error: str = ""
     gps_checked: bool = False
@@ -497,7 +504,25 @@ def load_from_row(row: GridRow) -> GpsLoad:
         last_comment_by=_plain(comment_lines[1]) if len(comment_lines) > 1 else "",
         last_comment=_plain(" ".join(comment_lines[2:])) if len(comment_lines) > 2 else "",
         **reps,
+        **_carrier_update(row),
     )
+
+
+def _carrier_update(row: GridRow) -> dict[str, str]:
+    """The newest line of the row's "Carrier Update" column (newest first): its text and its
+    time as "Thu 11/19 17:51"; empty when the column is missing or blank."""
+
+    lines = [_plain(l) for l in row.lines("CarrierUpdate") if _plain(l)]
+    if not lines:
+        return {}
+    match = _CARRIER_UPDATE_RE.match(lines[0])
+    if not match:
+        return {"carrier_update": lines[0]}
+    try:
+        at = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").strftime("%a %m/%d %H:%M")
+    except ValueError:
+        at = match.group(1)
+    return {"carrier_update": match.group(2).strip(), "carrier_update_at": at}
 
 
 def customer_excluded(load: GpsLoad, patterns: tuple[str, ...] | list[str]) -> bool:
@@ -1517,7 +1542,7 @@ def _text_table(headers: list[str], rows: list[tuple[Any, ...] | list[Any]],
     return lines
 
 
-def _report_line(load: GpsLoad, now: datetime) -> str:
+def _report_line(load: GpsLoad, now: datetime, carrier_update: bool = False) -> str:
     bits = [f"{'Load' if load.kind == 'load' else 'Order'} {load.load_id}", load.status or "status ?",
             f"{load.origin or '?'} -> {load.dest or '?'}", f"pickup ETA {_fmt_eta(load.pickup_eta)}"]
     carrier = load.carrier or "carrier ?"
@@ -1529,10 +1554,12 @@ def _report_line(load: GpsLoad, now: datetime) -> str:
     bits.append(f"sales rep {nice_name(load.sales_rep) if load.sales_rep else 'none'}")
     if load.last_comment:
         bits.append(f"last dispatch comment ({load.last_comment_at}): {load.last_comment}")
+    if carrier_update and load.carrier_update:
+        bits.append(f"carrier update" + (f" ({load.carrier_update_at})" if load.carrier_update_at else "") + f": {load.carrier_update}")
     return "  |  ".join(bits)
 
 
-def _report_text_section(title: str, members: list[GpsLoad], now: datetime, hint: str) -> list[str]:
+def _report_text_section(title: str, members: list[GpsLoad], now: datetime, hint: str, carrier_update: bool = False) -> list[str]:
     lines = [f"{title.upper()} ({len(members)})", hint, ""]
     if not members:
         return lines + ["  none", ""]
@@ -1544,7 +1571,7 @@ def _report_text_section(title: str, members: list[GpsLoad], now: datetime, hint
         while j < len(customer):
             rep = [l for l in customer if l.dispatch_key == customer[j].dispatch_key]
             lines.append(f"  {_dispatch_label(customer[j])} ({len(rep)})")
-            lines += ["    " + _report_line(l, now) for l in rep]
+            lines += ["    " + _report_line(l, now, carrier_update) for l in rep]
             j += len(rep)
         lines.append("")
         i += len(customer)
@@ -1556,10 +1583,11 @@ _TH = '<th style="text-align:left;padding:4px 8px;border-bottom:2px solid #999">
 _TD_NUM = '<td style="padding:4px 8px;border-bottom:1px solid #ddd;text-align:right">'
 
 
-def _report_html_table(members: list[GpsLoad], now: datetime, *, with_ping: bool) -> str:
+def _report_html_table(members: list[GpsLoad], now: datetime, *, with_ping: bool, carrier_update: bool = False) -> str:
     esc = html_lib.escape
     headers = ["Customer", "Dispatch rep", "Load", "Status", "Lane", "Carrier / driver", "Pickup ETA"] \
-        + (["Last GPS ping"] if with_ping else []) + ["Sales rep", "Last dispatch comment"]
+        + (["Last GPS ping"] if with_ping else []) + ["Sales rep", "Last dispatch comment"] \
+        + (["Carrier update"] if carrier_update else [])
     rows = []
     for load in members:
         carrier = esc(load.carrier or "?")
@@ -1583,6 +1611,9 @@ def _report_html_table(members: list[GpsLoad], now: datetime, *, with_ping: bool
                 cells.append(f'<b style="color:#b00020">{esc(local.strftime("%a %m/%d %H:%M"))}</b> {esc(load.last_ping.where)}'
                              f"<br><small>{esc(ago_text((now - load.last_ping.when).total_seconds() / 3600))}</small>")
         cells += [esc(nice_name(load.sales_rep) if load.sales_rep else "none"), comment]
+        if carrier_update:
+            cells.append(f"{esc(load.carrier_update)}" + (f"<br><small>{esc(load.carrier_update_at)}</small>" if load.carrier_update_at else "")
+                         if load.carrier_update else "")
         rows.append("<tr>" + "".join(_TD + c + "</td>" for c in cells) + "</tr>")
     th = "".join(_TH + esc(h) + "</th>" for h in headers)
     return f'<table style="border-collapse:collapse;font-size:13px"><tr>{th}</tr>{"".join(rows)}</table>'
@@ -1834,7 +1865,7 @@ def compose_noping_report(
     text_parts += ["BY CUSTOMER"] + _np_table_text("customer", by_customer, total=True) + [""]
     text_parts += ["BY DISPATCH REP"] + _np_table_text("dispatch rep", by_rep, total=True) + [""]
     hint = (f"No position from the tracking app{' or MacroPoint' if mp_ok is not None else ''} in the last {gps_days} days.")
-    text_parts += _report_text_section("No GPS pings", never, now, hint)
+    text_parts += _report_text_section("No GPS pings", never, now, hint, carrier_update=True)
     if unknown:
         text_parts += [f"GPS PAGE UNREADABLE ({len(unknown)}, not counted): " + ", ".join(l.load_id for l in unknown), ""]
     text_parts.append(trailer)
@@ -1846,7 +1877,7 @@ def compose_noping_report(
               '<h3 style="margin:16px 0 4px">By dispatch rep</h3>' + _np_table_html("Dispatch rep", by_rep, total=True),
               f'<h3 style="margin:20px 0 2px">No GPS pings ({len(never)})</h3><p style="margin:0 0 6px;color:#444">'
               f"{esc(hint)}</p>"
-              + (_report_html_table(never, now, with_ping=False) if never else "<p>none</p>")]
+              + (_report_html_table(never, now, with_ping=False, carrier_update=True) if never else "<p>none</p>")]
     if unknown:
         blocks.append(f'<p style="color:#444">GPS page unreadable ({len(unknown)}, not counted): '
                       + ", ".join(f'<a href="{esc(l.url)}">{esc(l.load_id)}</a>' for l in unknown) + "</p>")
